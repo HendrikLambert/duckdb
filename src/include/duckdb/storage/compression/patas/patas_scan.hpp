@@ -192,9 +192,9 @@ public:
 
 		if (total_value_count != 0 && !GroupFinished()) {
 			// Finish skipping the current group
-			idx_t to_skip = LeftInGroup();
-			skip_count -= to_skip;
+			idx_t to_skip = MinValue<idx_t>(skip_count, LeftInGroup());
 			ScanGroup<EXACT_TYPE, true>(nullptr, to_skip);
+			skip_count -= to_skip;
 		}
 		// Figure out how many entire groups we can skip
 		// For these groups, we don't even need to process the metadata or values
