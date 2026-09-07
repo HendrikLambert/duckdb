@@ -46,7 +46,7 @@ public:
 		index = 0;
 	}
 
-	void LoadPackedData(uint16_t *packed_data, idx_t count) {
+	void LoadPackedData(const PatasPrimitives::PACKED_DATA_TYPE *packed_data, idx_t count) {
 		for (idx_t i = 0; i < count; i++) {
 			auto &unpacked = unpacked_data[i];
 			PackedDataUtils<EXACT_TYPE>::Unpack(packed_data[i], (UnpackedData &)unpacked);
@@ -103,7 +103,7 @@ public:
 		// ScanStates never exceed the boundaries of a Segment,
 		// but are not guaranteed to start at the beginning of the Block
 		segment_data = handle.GetDataMutable() + segment.GetBlockOffset();
-		auto metadata_offset = Load<uint32_t>(segment_data);
+		auto metadata_offset = Load<PatasPrimitives::METADATA_POINTER_TYPE>(segment_data);
 		if (segment.GetBlockOffset() + metadata_offset > segment.GetBlockSize()) {
 			throw DataCorruptionException(
 			    "Corrupted Patas segment: metadata_offset reaches outside of the blocks memory");
@@ -152,10 +152,10 @@ public:
 	// Using the metadata, we can avoid loading any of the data if we don't care about the group at all
 	void SkipGroup() {
 		// Skip the offset indicating where the data starts
-		metadata_ptr -= sizeof(uint32_t);
+		metadata_ptr -= PatasPrimitives::GROUP_OFFSET_SIZE;
 		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, count - total_value_count);
 		// Skip the blocks of packed data
-		metadata_ptr -= sizeof(uint16_t) * group_size;
+		metadata_ptr -= PatasPrimitives::PACKED_DATA_SIZE * group_size;
 
 		total_value_count += group_size;
 	}
@@ -165,8 +165,8 @@ public:
 		group_state.Reset();
 
 		// Load the offset indicating where a groups data starts
-		metadata_ptr -= sizeof(uint32_t);
-		auto data_byte_offset = Load<uint32_t>(metadata_ptr);
+		metadata_ptr -= PatasPrimitives::GROUP_OFFSET_SIZE;
+		auto data_byte_offset = Load<PatasPrimitives::GROUP_OFFSET_TYPE>(metadata_ptr);
 		if (segment.GetBlockOffset() + data_byte_offset >= segment.GetBlockSize()) {
 			throw DataCorruptionException(
 			    "Corrupted Patas segment: data_byte_offset would reach outside of the blocks memory");
@@ -178,8 +178,8 @@ public:
 		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, (count - total_value_count));
 
 		// Read the compacted blocks of (7 + 6 + 3 bits) value stats
-		metadata_ptr -= sizeof(uint16_t) * group_size;
-		group_state.LoadPackedData((uint16_t *)metadata_ptr, group_size);
+		metadata_ptr -= PatasPrimitives::PACKED_DATA_SIZE * group_size;
+		group_state.LoadPackedData((PatasPrimitives::PACKED_DATA_TYPE *)metadata_ptr, group_size);
 
 		// Read all the values to the specified 'value_buffer'
 		group_state.template LoadValues<SKIP>(value_buffer, group_size);
