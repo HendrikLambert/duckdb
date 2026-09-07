@@ -29,7 +29,7 @@ namespace duckdb {
 [[noreturn]] void ThrowPatasInvalidPackedValueMetadata();
 [[noreturn]] void ThrowPatasMetadataBeforeHeader();
 [[noreturn]] void ThrowPatasMetadataTableOutOfBounds();
-[[noreturn]] void ThrowPatasDataOffsetOutOfBounds();
+[[noreturn]] void ThrowPatasGroupDataOutOfBounds();
 
 //! Do not change order of these variables
 struct PatasUnpackedValueStats {
@@ -53,11 +53,24 @@ public:
 		index = 0;
 	}
 
-	void LoadPackedData(const PatasPrimitives::PACKED_DATA_TYPE *packed_data, idx_t count) {
+	idx_t LoadPackedData(const PatasPrimitives::PACKED_DATA_TYPE *packed_data, idx_t count) {
+		idx_t data_size = 0;
 		for (idx_t i = 0; i < count; i++) {
 			auto &unpacked = unpacked_data[i];
 			PackedDataUtils<EXACT_TYPE>::Unpack(packed_data[i], (UnpackedData &)unpacked);
+			if (unpacked.index_diff > i) {
+				ThrowPatasInvalidBackwardReference();
+			}
+			if (unpacked.significant_bytes > sizeof(EXACT_TYPE) || unpacked.trailing_zeros >= sizeof(EXACT_TYPE) * 8) {
+				ThrowPatasInvalidPackedValueMetadata();
+			}
+			if (unpacked.significant_bytes == 0 && unpacked.trailing_zeros < 8) {
+				data_size += sizeof(EXACT_TYPE);
+			} else {
+				data_size += unpacked.significant_bytes;
+			}
 		}
+		return data_size;
 	}
 
 	template <bool SKIP = false>
@@ -75,14 +88,6 @@ public:
 		}
 		value_buffer[0] = (EXACT_TYPE)0;
 		for (idx_t i = 0; i < count; i++) {
-			if (unpacked_data[i].index_diff > i) {
-				ThrowPatasInvalidBackwardReference();
-			}
-			if (unpacked_data[i].significant_bytes > sizeof(EXACT_TYPE) ||
-			    unpacked_data[i].trailing_zeros >= sizeof(EXACT_TYPE) * 8) {
-				ThrowPatasInvalidPackedValueMetadata();
-			}
-
 			value_buffer[i] = patas::PatasDecompression<EXACT_TYPE>::DecompressValue(
 			    byte_reader, unpacked_data[i].significant_bytes, unpacked_data[i].trailing_zeros,
 			    value_buffer[i - unpacked_data[i].index_diff]);
@@ -197,14 +202,17 @@ public:
 		auto data_byte_offset = metadata.template ReadBackward<PatasPrimitives::GROUP_OFFSET_TYPE>();
 		if (data_byte_offset < PatasPrimitives::HEADER_SIZE ||
 		    data_byte_offset - PatasPrimitives::HEADER_SIZE > layout.data.Size()) {
-			ThrowPatasDataOffsetOutOfBounds();
+			ThrowPatasGroupDataOutOfBounds();
 		}
 
-		auto data_offset = data_byte_offset - PatasPrimitives::HEADER_SIZE;
-		group_state.Init(layout.data.GetBytes(data_offset, layout.data.Size() - data_offset).data());
-
 		auto packed_data = metadata.template GetArray<PatasPrimitives::PACKED_DATA_TYPE>(0, group_size);
-		group_state.LoadPackedData(packed_data.data(), group_size);
+		auto data_size = group_state.LoadPackedData(packed_data.data(), group_size);
+		auto data_offset = data_byte_offset - PatasPrimitives::HEADER_SIZE;
+		if (data_size > layout.data.Size() - data_offset) {
+			ThrowPatasGroupDataOutOfBounds();
+		}
+		auto data = layout.data.GetSubReader(data_offset, data_size, "Patas group data");
+		group_state.Init(data.GetBytes(0, data.Size()).data());
 
 		// Read all the values to the specified 'value_buffer'
 		group_state.template LoadValues<SKIP>(value_buffer, group_size);

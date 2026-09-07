@@ -23,8 +23,8 @@ void ThrowPatasMetadataTableOutOfBounds() {
 	throw DataCorruptionException("Corrupted Patas segment: metadata table exceeds the segment");
 }
 
-void ThrowPatasDataOffsetOutOfBounds() {
-	throw DataCorruptionException("Corrupted Patas segment: group data offset is outside the data region");
+void ThrowPatasGroupDataOutOfBounds() {
+	throw DataCorruptionException("Corrupted Patas segment: group data is outside the data region");
 }
 
 template <class T>
