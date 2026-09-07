@@ -15,16 +15,16 @@ void ThrowPatasInvalidPackedValueMetadata() {
 	throw DataCorruptionException("Corrupted Patas segment: invalid packed value metadata");
 }
 
-void ThrowPatasHeaderOutOfBounds() {
-	throw DataCorruptionException("Corrupted Patas segment: header reaches outside of the block");
+void ThrowPatasMetadataBeforeHeader() {
+	throw DataCorruptionException("Corrupted Patas segment: metadata ends before the segment header");
 }
 
-void ThrowPatasMetadataOffsetOutOfBounds() {
-	throw DataCorruptionException("Corrupted Patas segment: metadata_offset is outside of the segment");
+void ThrowPatasMetadataTableOutOfBounds() {
+	throw DataCorruptionException("Corrupted Patas segment: metadata table exceeds the segment");
 }
 
 void ThrowPatasDataOffsetOutOfBounds() {
-	throw DataCorruptionException("Corrupted Patas segment: data_byte_offset would reach outside of the blocks memory");
+	throw DataCorruptionException("Corrupted Patas segment: group data offset is outside the data region");
 }
 
 template <class T>

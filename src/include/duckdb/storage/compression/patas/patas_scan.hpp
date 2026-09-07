@@ -18,6 +18,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/function/compression_function.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/compression/compression_segment_reader.hpp"
 
 #include "duckdb/storage/table/column_segment.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -26,8 +27,8 @@ namespace duckdb {
 
 [[noreturn]] void ThrowPatasInvalidBackwardReference();
 [[noreturn]] void ThrowPatasInvalidPackedValueMetadata();
-[[noreturn]] void ThrowPatasHeaderOutOfBounds();
-[[noreturn]] void ThrowPatasMetadataOffsetOutOfBounds();
+[[noreturn]] void ThrowPatasMetadataBeforeHeader();
+[[noreturn]] void ThrowPatasMetadataTableOutOfBounds();
 [[noreturn]] void ThrowPatasDataOffsetOutOfBounds();
 
 //! Do not change order of these variables
@@ -40,7 +41,7 @@ struct PatasUnpackedValueStats {
 template <class EXACT_TYPE>
 struct PatasGroupState {
 public:
-	void Init(uint8_t *data) {
+	void Init(const uint8_t *data) {
 		byte_reader.SetStream(data);
 	}
 
@@ -102,31 +103,48 @@ struct PatasScanState : public SegmentScanState {
 public:
 	using EXACT_TYPE = typename FloatingToExact<T>::TYPE;
 
+	struct SegmentLayout {
+		CompressionSegmentReader data;
+		CompressionSegmentReader metadata;
+	};
+
+	static SegmentLayout ReadSegmentLayout(const BufferHandle &handle, ColumnSegment &segment, idx_t count) {
+		auto reader = CompressionSegmentReader::FromSegment(handle, segment, "Patas segment");
+		auto metadata_end = reader.template Read<PatasPrimitives::METADATA_POINTER_TYPE>();
+		if (metadata_end < PatasPrimitives::HEADER_SIZE) {
+			ThrowPatasMetadataBeforeHeader();
+		}
+		reader = reader.GetSubReader(0, metadata_end, "Patas segment");
+
+		auto group_count = count / PatasPrimitives::PATAS_GROUP_SIZE + (count % PatasPrimitives::PATAS_GROUP_SIZE != 0);
+		auto metadata_capacity = metadata_end - PatasPrimitives::HEADER_SIZE;
+		if (group_count > metadata_capacity / PatasPrimitives::GROUP_OFFSET_SIZE) {
+			ThrowPatasMetadataTableOutOfBounds();
+		}
+		auto group_offsets_size = group_count * PatasPrimitives::GROUP_OFFSET_SIZE;
+		metadata_capacity -= group_offsets_size;
+		if (count > metadata_capacity / PatasPrimitives::PACKED_DATA_SIZE) {
+			ThrowPatasMetadataTableOutOfBounds();
+		}
+		auto metadata_size = group_offsets_size + count * PatasPrimitives::PACKED_DATA_SIZE;
+		auto metadata_start = metadata_end - metadata_size;
+		auto data = reader.GetSubReader(PatasPrimitives::HEADER_SIZE, metadata_start - PatasPrimitives::HEADER_SIZE,
+		                                "Patas data");
+		auto metadata = reader.GetSubReader(metadata_start, metadata_size, "Patas metadata");
+		return {data, metadata};
+	}
+
 	explicit PatasScanState(BufferHandle handle_p, ColumnSegment &segment)
-	    : handle(std::move(handle_p)), segment(segment), count(segment.count) {
-		const auto block_offset = segment.GetBlockOffset();
-		const auto block_size = segment.GetBlockSize();
-		if (block_offset > block_size || PatasPrimitives::HEADER_SIZE > block_size - block_offset) {
-			ThrowPatasHeaderOutOfBounds();
-		}
-		// ScanStates never exceed the boundaries of a Segment,
-		// but are not guaranteed to start at the beginning of the Block
-		segment_data = handle.GetDataMutable() + block_offset;
-		auto metadata_offset = Load<PatasPrimitives::METADATA_POINTER_TYPE>(segment_data);
-		if (metadata_offset < PatasPrimitives::HEADER_SIZE || metadata_offset > block_size - block_offset) {
-			ThrowPatasMetadataOffsetOutOfBounds();
-		}
-		metadata_ptr = segment_data + metadata_offset;
+	    : handle(std::move(handle_p)), count(segment.count), layout(ReadSegmentLayout(handle, segment, count)),
+	      metadata_position(layout.metadata.Size()) {
 	}
 
 	BufferHandle handle;
-	data_ptr_t metadata_ptr;
-	data_ptr_t segment_data;
+	idx_t count;
+	SegmentLayout layout;
+	idx_t metadata_position;
 	idx_t total_value_count = 0;
 	PatasGroupState<EXACT_TYPE> group_state;
-
-	ColumnSegment &segment;
-	idx_t count;
 
 	idx_t LeftInGroup() const {
 		return PatasPrimitives::PATAS_GROUP_SIZE - (total_value_count % PatasPrimitives::PATAS_GROUP_SIZE);
@@ -159,12 +177,10 @@ public:
 
 	// Using the metadata, we can avoid loading any of the data if we don't care about the group at all
 	void SkipGroup() {
-		// Skip the offset indicating where the data starts
-		metadata_ptr -= PatasPrimitives::GROUP_OFFSET_SIZE;
 		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, count - total_value_count);
-		// Skip the blocks of packed data
-		metadata_ptr -= PatasPrimitives::PACKED_DATA_SIZE * group_size;
-
+		auto group_metadata_size = PatasPrimitives::GROUP_OFFSET_SIZE + PatasPrimitives::PACKED_DATA_SIZE * group_size;
+		D_ASSERT(group_metadata_size <= metadata_position);
+		metadata_position -= group_metadata_size;
 		total_value_count += group_size;
 	}
 
@@ -172,21 +188,23 @@ public:
 	void LoadGroup(EXACT_TYPE *value_buffer) {
 		group_state.Reset();
 
-		// Load the offset indicating where a groups data starts
-		metadata_ptr -= PatasPrimitives::GROUP_OFFSET_SIZE;
-		auto data_byte_offset = Load<PatasPrimitives::GROUP_OFFSET_TYPE>(metadata_ptr);
-		if (segment.GetBlockOffset() + data_byte_offset >= segment.GetBlockSize()) {
+		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, count - total_value_count);
+		auto group_metadata_size = PatasPrimitives::GROUP_OFFSET_SIZE + PatasPrimitives::PACKED_DATA_SIZE * group_size;
+		D_ASSERT(group_metadata_size <= metadata_position);
+		metadata_position -= group_metadata_size;
+		auto metadata = layout.metadata.GetSubReader(metadata_position, group_metadata_size, "Patas group metadata");
+		metadata.SetPosition(metadata.Size());
+		auto data_byte_offset = metadata.template ReadBackward<PatasPrimitives::GROUP_OFFSET_TYPE>();
+		if (data_byte_offset < PatasPrimitives::HEADER_SIZE ||
+		    data_byte_offset - PatasPrimitives::HEADER_SIZE > layout.data.Size()) {
 			ThrowPatasDataOffsetOutOfBounds();
 		}
 
-		// Initialize the byte_reader with the data values for the group
-		group_state.Init(segment_data + data_byte_offset);
+		auto data_offset = data_byte_offset - PatasPrimitives::HEADER_SIZE;
+		group_state.Init(layout.data.GetBytes(data_offset, layout.data.Size() - data_offset).data());
 
-		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, (count - total_value_count));
-
-		// Read the compacted blocks of (7 + 6 + 3 bits) value stats
-		metadata_ptr -= PatasPrimitives::PACKED_DATA_SIZE * group_size;
-		group_state.LoadPackedData((PatasPrimitives::PACKED_DATA_TYPE *)metadata_ptr, group_size);
+		auto packed_data = metadata.template GetArray<PatasPrimitives::PACKED_DATA_TYPE>(0, group_size);
+		group_state.LoadPackedData(packed_data.data(), group_size);
 
 		// Read all the values to the specified 'value_buffer'
 		group_state.template LoadValues<SKIP>(value_buffer, group_size);
