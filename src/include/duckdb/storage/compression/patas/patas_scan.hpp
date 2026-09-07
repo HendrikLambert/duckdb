@@ -57,7 +57,7 @@ public:
 		idx_t data_size = 0;
 		for (idx_t i = 0; i < count; i++) {
 			auto &unpacked = unpacked_data[i];
-			PackedDataUtils<EXACT_TYPE>::Unpack(packed_data[i], (UnpackedData &)unpacked);
+			unpacked = Unpack(packed_data[i]);
 			if (unpacked.index_diff > i || (i > 0 && unpacked.index_diff == 0)) {
 				ThrowPatasInvalidBackwardReference();
 			}
@@ -71,6 +71,11 @@ public:
 			}
 		}
 		return data_size;
+	}
+
+	static PatasUnpackedValueStats Unpack(PatasPrimitives::PACKED_DATA_TYPE packed_data) {
+		auto unpacked = PackedDataUtils<EXACT_TYPE>::Unpack(packed_data);
+		return {unpacked.leading_zero, unpacked.significant_bits, unpacked.index};
 	}
 
 	template <bool SKIP = false>
