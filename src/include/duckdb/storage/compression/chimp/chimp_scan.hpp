@@ -16,6 +16,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/function/compression_function.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/compression/compression_segment_reader.hpp"
 
 #include "duckdb/storage/table/column_segment.hpp"
 
@@ -24,6 +25,8 @@
 #include "duckdb/storage/table/scan_state.hpp"
 
 namespace duckdb {
+
+[[noreturn]] void ThrowChimpMetadataBeforeHeader();
 
 template <class CHIMP_TYPE>
 struct ChimpGroupState {
@@ -133,17 +136,18 @@ struct ChimpScanState : public SegmentScanState {
 public:
 	using CHIMP_TYPE = typename ChimpType<T>::TYPE;
 
-	explicit ChimpScanState(ColumnSegment &segment) : segment(segment), segment_count(segment.count) {
-		auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	explicit ChimpScanState(BufferHandle handle_p, ColumnSegment &segment)
+	    : handle(std::move(handle_p)), segment(segment), segment_count(segment.count) {
+		auto reader = CompressionSegmentReader::FromSegment(handle, segment, "Chimp segment");
+		auto metadata_end = reader.template Read<ChimpPrimitives::METADATA_POINTER_TYPE>();
+		if (metadata_end < ChimpPrimitives::HEADER_SIZE) {
+			ThrowChimpMetadataBeforeHeader();
+		}
+		reader = reader.GetSubReader(0, metadata_end, "Chimp segment");
 
-		handle = buffer_manager.Pin(segment.GetBlockHandle());
-		auto dataptr = handle.GetDataMutable();
-		// ScanStates never exceed the boundaries of a Segment,
-		// but are not guaranteed to start at the beginning of the Block
-		auto start_of_data_segment = dataptr + segment.GetBlockOffset() + ChimpPrimitives::HEADER_SIZE;
-		group_state.Init(start_of_data_segment);
-		auto metadata_offset = Load<uint32_t>(dataptr + segment.GetBlockOffset());
-		metadata_ptr = dataptr + segment.GetBlockOffset() + metadata_offset;
+		auto segment_data = handle.GetDataMutable() + segment.GetBlockOffset();
+		group_state.Init(segment_data + ChimpPrimitives::HEADER_SIZE);
+		metadata_ptr = segment_data + metadata_end;
 	}
 
 	BufferHandle handle;
@@ -248,7 +252,9 @@ public:
 
 template <class T>
 unique_ptr<SegmentScanState> ChimpInitScan(const QueryContext &context, ColumnSegment &segment) {
-	auto result = make_uniq_base<SegmentScanState, ChimpScanState<T>>(segment);
+	auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	auto handle = buffer_manager.Pin(context, segment.GetBlockHandle());
+	auto result = make_uniq_base<SegmentScanState, ChimpScanState<T>>(std::move(handle), segment);
 	return result;
 }
 

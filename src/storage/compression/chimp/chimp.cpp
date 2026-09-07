@@ -7,6 +7,10 @@
 
 namespace duckdb {
 
+void ThrowChimpMetadataBeforeHeader() {
+	throw DataCorruptionException("Corrupted Chimp segment: metadata ends before the segment header");
+}
+
 template <class T>
 CompressionFunction GetChimpFunction(PhysicalType data_type) {
 	return CompressionFunction(CompressionType::COMPRESSION_CHIMP, data_type, ChimpInitAnalyze<T>, ChimpAnalyze<T>,

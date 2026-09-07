@@ -20,7 +20,9 @@ template <class T>
 void ChimpFetchRow(ColumnSegment &segment, ColumnFetchState &state, row_t row_id, Vector &result, idx_t result_idx) {
 	using INTERNAL_TYPE = typename ChimpType<T>::TYPE;
 
-	ChimpScanState<T> scan_state(segment);
+	auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	auto handle = buffer_manager.Pin(state.context, segment.GetBlockHandle());
+	ChimpScanState<T> scan_state(std::move(handle), segment);
 	scan_state.Skip(segment, UnsafeNumericCast<idx_t>(row_id));
 	auto result_data = FlatVector::GetDataMutable<INTERNAL_TYPE>(result);
 
