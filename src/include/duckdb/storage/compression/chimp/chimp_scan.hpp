@@ -31,7 +31,7 @@ namespace duckdb {
 template <class CHIMP_TYPE>
 struct ChimpGroupState {
 public:
-	void Init(uint8_t *data) {
+	void Init(unsafe_array_ptr<const uint8_t> data) {
 		chimp_state.input.SetStream(data);
 		Reset();
 	}
@@ -146,7 +146,7 @@ public:
 		reader = reader.GetSubReader(0, metadata_end, "Chimp segment");
 
 		auto segment_data = handle.GetDataMutable() + segment.GetBlockOffset();
-		group_state.Init(segment_data + ChimpPrimitives::HEADER_SIZE);
+		group_state.Init(reader.GetBytes(ChimpPrimitives::HEADER_SIZE, metadata_end - ChimpPrimitives::HEADER_SIZE));
 		metadata_ptr = segment_data + metadata_end;
 	}
 
