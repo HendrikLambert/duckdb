@@ -24,6 +24,12 @@
 
 namespace duckdb {
 
+[[noreturn]] void ThrowPatasInvalidBackwardReference();
+[[noreturn]] void ThrowPatasInvalidPackedValueMetadata();
+[[noreturn]] void ThrowPatasHeaderOutOfBounds();
+[[noreturn]] void ThrowPatasMetadataOffsetOutOfBounds();
+[[noreturn]] void ThrowPatasDataOffsetOutOfBounds();
+
 //! Do not change order of these variables
 struct PatasUnpackedValueStats {
 	uint8_t significant_bytes;
@@ -69,11 +75,11 @@ public:
 		value_buffer[0] = (EXACT_TYPE)0;
 		for (idx_t i = 0; i < count; i++) {
 			if (unpacked_data[i].index_diff > i) {
-				throw DataCorruptionException("Corrupted Patas segment: invalid backward reference");
+				ThrowPatasInvalidBackwardReference();
 			}
 			if (unpacked_data[i].significant_bytes > sizeof(EXACT_TYPE) ||
 			    unpacked_data[i].trailing_zeros >= sizeof(EXACT_TYPE) * 8) {
-				throw DataCorruptionException("Corrupted Patas segment: invalid packed value metadata");
+				ThrowPatasInvalidPackedValueMetadata();
 			}
 
 			value_buffer[i] = patas::PatasDecompression<EXACT_TYPE>::DecompressValue(
@@ -96,17 +102,19 @@ struct PatasScanState : public SegmentScanState {
 public:
 	using EXACT_TYPE = typename FloatingToExact<T>::TYPE;
 
-	explicit PatasScanState(ColumnSegment &segment) : segment(segment), count(segment.count) {
-		auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
-
-		handle = buffer_manager.Pin(segment.GetBlockHandle());
+	explicit PatasScanState(BufferHandle handle_p, ColumnSegment &segment)
+	    : handle(std::move(handle_p)), segment(segment), count(segment.count) {
+		const auto block_offset = segment.GetBlockOffset();
+		const auto block_size = segment.GetBlockSize();
+		if (block_offset > block_size || PatasPrimitives::HEADER_SIZE > block_size - block_offset) {
+			ThrowPatasHeaderOutOfBounds();
+		}
 		// ScanStates never exceed the boundaries of a Segment,
 		// but are not guaranteed to start at the beginning of the Block
-		segment_data = handle.GetDataMutable() + segment.GetBlockOffset();
+		segment_data = handle.GetDataMutable() + block_offset;
 		auto metadata_offset = Load<PatasPrimitives::METADATA_POINTER_TYPE>(segment_data);
-		if (segment.GetBlockOffset() + metadata_offset > segment.GetBlockSize()) {
-			throw DataCorruptionException(
-			    "Corrupted Patas segment: metadata_offset reaches outside of the blocks memory");
+		if (metadata_offset < PatasPrimitives::HEADER_SIZE || metadata_offset > block_size - block_offset) {
+			ThrowPatasMetadataOffsetOutOfBounds();
 		}
 		metadata_ptr = segment_data + metadata_offset;
 	}
@@ -168,8 +176,7 @@ public:
 		metadata_ptr -= PatasPrimitives::GROUP_OFFSET_SIZE;
 		auto data_byte_offset = Load<PatasPrimitives::GROUP_OFFSET_TYPE>(metadata_ptr);
 		if (segment.GetBlockOffset() + data_byte_offset >= segment.GetBlockSize()) {
-			throw DataCorruptionException(
-			    "Corrupted Patas segment: data_byte_offset would reach outside of the blocks memory");
+			ThrowPatasDataOffsetOutOfBounds();
 		}
 
 		// Initialize the byte_reader with the data values for the group
@@ -214,7 +221,9 @@ public:
 
 template <class T>
 unique_ptr<SegmentScanState> PatasInitScan(const QueryContext &context, ColumnSegment &segment) {
-	auto result = make_uniq_base<SegmentScanState, PatasScanState<T>>(segment);
+	auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	auto handle = buffer_manager.Pin(context, segment.GetBlockHandle());
+	auto result = make_uniq_base<SegmentScanState, PatasScanState<T>>(std::move(handle), segment);
 	return result;
 }
 

@@ -7,6 +7,26 @@
 
 namespace duckdb {
 
+void ThrowPatasInvalidBackwardReference() {
+	throw DataCorruptionException("Corrupted Patas segment: invalid backward reference");
+}
+
+void ThrowPatasInvalidPackedValueMetadata() {
+	throw DataCorruptionException("Corrupted Patas segment: invalid packed value metadata");
+}
+
+void ThrowPatasHeaderOutOfBounds() {
+	throw DataCorruptionException("Corrupted Patas segment: header reaches outside of the block");
+}
+
+void ThrowPatasMetadataOffsetOutOfBounds() {
+	throw DataCorruptionException("Corrupted Patas segment: metadata_offset is outside of the segment");
+}
+
+void ThrowPatasDataOffsetOutOfBounds() {
+	throw DataCorruptionException("Corrupted Patas segment: data_byte_offset would reach outside of the blocks memory");
+}
+
 template <class T>
 CompressionFunction GetPatasFunction(PhysicalType data_type) {
 	throw NotImplementedException("GetPatasFunction not implemented for the given datatype");

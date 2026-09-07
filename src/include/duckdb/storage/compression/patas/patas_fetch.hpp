@@ -20,7 +20,9 @@ template <class T>
 void PatasFetchRow(ColumnSegment &segment, ColumnFetchState &state, row_t row_id, Vector &result, idx_t result_idx) {
 	using EXACT_TYPE = typename FloatingToExact<T>::TYPE;
 
-	PatasScanState<T> scan_state(segment);
+	auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	auto handle = buffer_manager.Pin(state.context, segment.GetBlockHandle());
+	PatasScanState<T> scan_state(std::move(handle), segment);
 	scan_state.Skip(segment, UnsafeNumericCast<idx_t>(row_id));
 	auto result_data = FlatVector::GetDataMutableUnsafe<EXACT_TYPE>(result);
 	result_data[result_idx] = (EXACT_TYPE)0;
