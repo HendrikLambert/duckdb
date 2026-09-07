@@ -58,7 +58,7 @@ public:
 		for (idx_t i = 0; i < count; i++) {
 			auto &unpacked = unpacked_data[i];
 			PackedDataUtils<EXACT_TYPE>::Unpack(packed_data[i], (UnpackedData &)unpacked);
-			if (unpacked.index_diff > i) {
+			if (unpacked.index_diff > i || (i > 0 && unpacked.index_diff == 0)) {
 				ThrowPatasInvalidBackwardReference();
 			}
 			if (unpacked.significant_bytes > sizeof(EXACT_TYPE) || unpacked.trailing_zeros >= sizeof(EXACT_TYPE) * 8) {
@@ -182,6 +182,8 @@ public:
 
 	// Using the metadata, we can avoid loading any of the data if we don't care about the group at all
 	void SkipGroup() {
+		D_ASSERT(GroupFinished());
+		D_ASSERT(total_value_count < count);
 		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, count - total_value_count);
 		auto group_metadata_size = PatasPrimitives::GROUP_OFFSET_SIZE + PatasPrimitives::PACKED_DATA_SIZE * group_size;
 		D_ASSERT(group_metadata_size <= metadata_position);
@@ -191,6 +193,8 @@ public:
 
 	template <bool SKIP = false>
 	void LoadGroup(EXACT_TYPE *value_buffer) {
+		D_ASSERT(GroupFinished());
+		D_ASSERT(total_value_count < count);
 		group_state.Reset();
 
 		idx_t group_size = MinValue((idx_t)PatasPrimitives::PATAS_GROUP_SIZE, count - total_value_count);
@@ -222,6 +226,8 @@ public:
 	//! Skip the next 'skip_count' values, we don't store the values
 	void Skip(ColumnSegment &segment, idx_t skip_count) {
 		using EXACT_TYPE = typename FloatingToExact<T>::TYPE;
+		D_ASSERT(total_value_count <= count);
+		D_ASSERT(skip_count <= count - total_value_count);
 
 		if (total_value_count != 0 && !GroupFinished()) {
 			// Finish skipping the current group
@@ -261,6 +267,8 @@ void PatasScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t scan
                       idx_t result_offset) {
 	using EXACT_TYPE = typename FloatingToExact<T>::TYPE;
 	auto &scan_state = (PatasScanState<T> &)*state.scan_state;
+	D_ASSERT(scan_state.total_value_count <= scan_state.count);
+	D_ASSERT(scan_count <= scan_state.count - scan_state.total_value_count);
 
 	// Get the pointer to the result values
 	auto current_result_ptr = FlatVector::GetDataMutableUnsafe<EXACT_TYPE>(result);
