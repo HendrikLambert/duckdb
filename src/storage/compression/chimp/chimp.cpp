@@ -11,6 +11,11 @@ void ThrowChimpMetadataBeforeHeader() {
 	throw DataCorruptionException("Corrupted Chimp segment: metadata ends before the segment header");
 }
 
+void ThrowChimpLeadingZeroBlockCountOutOfBounds(uint8_t block_count) {
+	throw DataCorruptionException("Corrupted Chimp segment: leading-zero block count %d exceeds %d", block_count,
+	                              ChimpPrimitives::CHIMP_SEQUENCE_SIZE / 8);
+}
+
 template <class T>
 CompressionFunction GetChimpFunction(PhysicalType data_type) {
 	return CompressionFunction(CompressionType::COMPRESSION_CHIMP, data_type, ChimpInitAnalyze<T>, ChimpAnalyze<T>,

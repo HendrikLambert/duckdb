@@ -27,6 +27,7 @@
 namespace duckdb {
 
 [[noreturn]] void ThrowChimpMetadataBeforeHeader();
+[[noreturn]] void ThrowChimpLeadingZeroBlockCountOutOfBounds(uint8_t block_count);
 
 template <class CHIMP_TYPE>
 struct ChimpGroupState {
@@ -55,18 +56,18 @@ public:
 		index += count;
 	}
 
-	void LoadFlags(uint8_t *packed_data, idx_t group_size) {
+	void LoadFlags(unsafe_array_ptr<const uint8_t> packed_data, idx_t group_size) {
 		FlagBuffer<false> flag_buffer;
-		flag_buffer.SetBuffer(packed_data);
+		flag_buffer.SetInput(packed_data);
 		flags[0] = ChimpConstants::Flags::VALUE_IDENTICAL; // First value doesn't require a flag
 		for (idx_t i = 0; i < group_size; i++) {
-			flags[1 + i] = (ChimpConstants::Flags)flag_buffer.Extract();
+			flags[1 + i] = static_cast<ChimpConstants::Flags>(flag_buffer.Extract());
 		}
 		max_flags_to_read = group_size;
 		index = 0;
 	}
 
-	void LoadLeadingZeros(uint8_t *packed_data, idx_t leading_zero_block_size) {
+	void LoadLeadingZeros(unsafe_array_ptr<const uint8_t> packed_data, idx_t leading_zero_count) {
 #ifdef DEBUG
 		idx_t flag_one_count = 0;
 		for (idx_t i = 0; i < max_flags_to_read; i++) {
@@ -74,14 +75,14 @@ public:
 		}
 		// There are 8 leading zero values packed in one block, the block could be partially filled
 		flag_one_count = AlignValue<idx_t, 8>(flag_one_count);
-		D_ASSERT(flag_one_count == leading_zero_block_size);
+		D_ASSERT(flag_one_count == leading_zero_count);
 #endif
 		LeadingZeroBuffer<false> leading_zero_buffer;
-		leading_zero_buffer.SetBuffer(packed_data);
-		for (idx_t i = 0; i < leading_zero_block_size; i++) {
+		leading_zero_buffer.SetInput(packed_data);
+		for (idx_t i = 0; i < leading_zero_count; i++) {
 			leading_zeros[i] = ChimpConstants::Decompression::LEADING_REPRESENTATION[leading_zero_buffer.Extract()];
 		}
-		max_leading_zeros_to_read = leading_zero_block_size;
+		max_leading_zeros_to_read = leading_zero_count;
 		leading_zero_index = 0;
 	}
 
@@ -93,14 +94,15 @@ public:
 		return count;
 	}
 
-	void LoadPackedData(uint16_t *packed_data, idx_t packed_data_block_count) {
+	void LoadPackedData(unsafe_array_ptr<const uint16_t> packed_data) {
+		auto packed_data_block_count = packed_data.size();
 		for (idx_t i = 0; i < packed_data_block_count; i++) {
-			PackedDataUtils<CHIMP_TYPE>::Unpack(packed_data[i], unpacked_data_blocks[i]);
-			if (unpacked_data_blocks[i].significant_bits == 0) {
-				unpacked_data_blocks[i].significant_bits = 64;
+			auto unpacked = PackedDataUtils<CHIMP_TYPE>::Unpack(packed_data[i]);
+			if (unpacked.significant_bits == 0) {
+				unpacked.significant_bits = 64;
 			}
-			unpacked_data_blocks[i].leading_zero =
-			    ChimpConstants::Decompression::LEADING_REPRESENTATION[unpacked_data_blocks[i].leading_zero];
+			unpacked.leading_zero = ChimpConstants::Decompression::LEADING_REPRESENTATION[unpacked.leading_zero];
+			unpacked_data_blocks[i] = unpacked;
 		}
 		unpacked_index = 0;
 		max_packed_data_to_read = packed_data_block_count;
@@ -137,21 +139,21 @@ public:
 	using CHIMP_TYPE = typename ChimpType<T>::TYPE;
 
 	explicit ChimpScanState(BufferHandle handle_p, ColumnSegment &segment)
-	    : handle(std::move(handle_p)), segment(segment), segment_count(segment.count) {
-		auto reader = CompressionSegmentReader::FromSegment(handle, segment, "Chimp segment");
-		auto metadata_end = reader.template Read<ChimpPrimitives::METADATA_POINTER_TYPE>();
+	    : handle(std::move(handle_p)),
+	      metadata(CompressionSegmentReader::FromSegment(handle, segment, "Chimp segment")), segment(segment),
+	      segment_count(segment.count) {
+		auto metadata_end = metadata.template Read<ChimpPrimitives::METADATA_POINTER_TYPE>();
 		if (metadata_end < ChimpPrimitives::HEADER_SIZE) {
 			ThrowChimpMetadataBeforeHeader();
 		}
-		reader = reader.GetSubReader(0, metadata_end, "Chimp segment");
+		metadata = metadata.GetSubReader(0, metadata_end, "Chimp segment");
 
-		auto segment_data = handle.GetDataMutable() + segment.GetBlockOffset();
-		group_state.Init(reader.GetBytes(ChimpPrimitives::HEADER_SIZE, metadata_end - ChimpPrimitives::HEADER_SIZE));
-		metadata_ptr = segment_data + metadata_end;
+		group_state.Init(metadata.GetBytes(ChimpPrimitives::HEADER_SIZE, metadata_end - ChimpPrimitives::HEADER_SIZE));
+		metadata.SetPosition(metadata_end);
 	}
 
 	BufferHandle handle;
-	data_ptr_t metadata_ptr;
+	CompressionSegmentReader metadata;
 	idx_t total_value_count = 0;
 	ChimpGroupState<CHIMP_TYPE> group_state;
 
@@ -190,20 +192,19 @@ public:
 		//! Extracting all the flags and counting the 3's
 
 		// Load the offset indicating where a groups data starts
-		metadata_ptr -= sizeof(uint32_t);
-		auto data_byte_offset = Load<uint32_t>(metadata_ptr);
+		auto data_byte_offset = metadata.ReadBackward<uint32_t>();
 		D_ASSERT(data_byte_offset < segment.GetBlockSize());
 		//  Only used for point queries
 		(void)data_byte_offset;
 
 		// Load how many blocks of leading zero bits we have
-		metadata_ptr -= sizeof(uint8_t);
-		auto leading_zero_block_count = Load<uint8_t>(metadata_ptr);
-		D_ASSERT(leading_zero_block_count <= ChimpPrimitives::CHIMP_SEQUENCE_SIZE / 8);
+		auto leading_zero_block_count = metadata.ReadBackward<uint8_t>();
+		if (leading_zero_block_count > ChimpPrimitives::CHIMP_SEQUENCE_SIZE / 8) {
+			ThrowChimpLeadingZeroBlockCountOutOfBounds(leading_zero_block_count);
+		}
 
-		// Load the leading zero block count
-		metadata_ptr -= 3ULL * leading_zero_block_count;
-		const auto leading_zero_block_ptr = metadata_ptr;
+		// Load the leading zero blocks
+		auto leading_zero_blocks = metadata.ReadBytesBackward(3ULL * leading_zero_block_count);
 
 		// Figure out how many flags there are
 		D_ASSERT(segment_count >= total_value_count);
@@ -213,21 +214,18 @@ public:
 		uint16_t flag_byte_count = AlignValue<uint16_t, 4>(UnsafeNumericCast<uint16_t>(flag_count)) / 4;
 
 		// Load the flags
-		metadata_ptr -= flag_byte_count;
-		auto flags = metadata_ptr;
+		auto flags = metadata.ReadBytesBackward(flag_byte_count);
 		group_state.LoadFlags(flags, flag_count);
 
 		// Load the leading zero blocks
-		group_state.LoadLeadingZeros(leading_zero_block_ptr, (uint32_t)leading_zero_block_count * 8);
+		group_state.LoadLeadingZeros(leading_zero_blocks, static_cast<idx_t>(leading_zero_block_count) * 8);
 
 		// Load packed data blocks
 		auto packed_data_block_count = group_state.CalculatePackedDataCount();
-		metadata_ptr -= packed_data_block_count * 2;
-		if ((uint64_t)metadata_ptr & 1) {
-			// Align on a two-byte boundary
-			metadata_ptr--;
-		}
-		group_state.LoadPackedData((uint16_t *)metadata_ptr, packed_data_block_count);
+		// Align (backwards) on a two-byte boundary
+		metadata.AlignBackward(sizeof(uint16_t));
+		auto packed_data = metadata.ReadArrayBackward<uint16_t>(packed_data_block_count);
+		group_state.LoadPackedData(packed_data);
 
 		group_state.Reset();
 
