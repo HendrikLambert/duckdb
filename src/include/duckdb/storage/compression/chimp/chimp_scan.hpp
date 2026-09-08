@@ -28,12 +28,15 @@ namespace duckdb {
 
 [[noreturn]] void ThrowChimpMetadataBeforeHeader();
 [[noreturn]] void ThrowChimpLeadingZeroBlockCountOutOfBounds(uint8_t block_count);
+[[noreturn]] void ThrowChimpLeadingZeroCountMismatch(idx_t stored_count, idx_t required_count);
+[[noreturn]] void ThrowChimpPackedDataExceedsType(uint8_t leading_zero, uint8_t significant_bits, idx_t bit_width);
+[[noreturn]] void ThrowChimpLeadingZeroStateMissing();
 
 template <class CHIMP_TYPE>
 struct ChimpGroupState {
 public:
-	void Init(unsafe_array_ptr<const uint8_t> data) {
-		chimp_state.input.SetStream(data);
+	void Init(unsafe_array_ptr<const uint8_t> data, uint8_t bit_offset = 0) {
+		chimp_state.input.SetStream(data, bit_offset);
 		Reset();
 	}
 
@@ -68,15 +71,6 @@ public:
 	}
 
 	void LoadLeadingZeros(unsafe_array_ptr<const uint8_t> packed_data, idx_t leading_zero_count) {
-#ifdef DEBUG
-		idx_t flag_one_count = 0;
-		for (idx_t i = 0; i < max_flags_to_read; i++) {
-			flag_one_count += flags[1 + i] == ChimpConstants::Flags::LEADING_ZERO_LOAD;
-		}
-		// There are 8 leading zero values packed in one block, the block could be partially filled
-		flag_one_count = AlignValue<idx_t, 8>(flag_one_count);
-		D_ASSERT(flag_one_count == leading_zero_count);
-#endif
 		LeadingZeroBuffer<false> leading_zero_buffer;
 		leading_zero_buffer.SetInput(packed_data);
 		for (idx_t i = 0; i < leading_zero_count; i++) {
@@ -94,6 +88,14 @@ public:
 		return count;
 	}
 
+	idx_t CalculateLeadingZeroCount() const {
+		idx_t count = 0;
+		for (idx_t i = 0; i < max_flags_to_read; i++) {
+			count += flags[1 + i] == ChimpConstants::Flags::LEADING_ZERO_LOAD;
+		}
+		return AlignValue<idx_t, 8>(count);
+	}
+
 	void LoadPackedData(unsafe_array_ptr<const uint16_t> packed_data) {
 		auto packed_data_block_count = packed_data.size();
 		for (idx_t i = 0; i < packed_data_block_count; i++) {
@@ -106,6 +108,48 @@ public:
 		}
 		unpacked_index = 0;
 		max_packed_data_to_read = packed_data_block_count;
+	}
+
+	idx_t ValidateAndCalculateDataBitCount(idx_t group_size) const {
+		using Decompression = Chimp128Decompression<CHIMP_TYPE>;
+		D_ASSERT(group_size == max_flags_to_read + 1);
+
+		idx_t data_bit_count = Decompression::BIT_SIZE;
+		idx_t leading_zero_position = 0;
+		idx_t packed_data_position = 0;
+		uint8_t leading_zero = NumericLimits<uint8_t>::Maximum();
+		for (idx_t i = 1; i < group_size; i++) {
+			switch (flags[i]) {
+			case ChimpConstants::Flags::VALUE_IDENTICAL:
+				data_bit_count += Decompression::INDEX_BITS_SIZE;
+				break;
+			case ChimpConstants::Flags::TRAILING_EXCEEDS_THRESHOLD: {
+				D_ASSERT(packed_data_position < max_packed_data_to_read);
+				auto &unpacked = unpacked_data_blocks[packed_data_position++];
+				if (unpacked.leading_zero > Decompression::BIT_SIZE ||
+				    unpacked.significant_bits > Decompression::BIT_SIZE - unpacked.leading_zero) {
+					ThrowChimpPackedDataExceedsType(unpacked.leading_zero, unpacked.significant_bits,
+					                                Decompression::BIT_SIZE);
+				}
+				leading_zero = unpacked.leading_zero;
+				data_bit_count += unpacked.significant_bits;
+				break;
+			}
+			case ChimpConstants::Flags::LEADING_ZERO_EQUALITY:
+				if (leading_zero > Decompression::BIT_SIZE) {
+					ThrowChimpLeadingZeroStateMissing();
+				}
+				data_bit_count += Decompression::BIT_SIZE - leading_zero;
+				break;
+			case ChimpConstants::Flags::LEADING_ZERO_LOAD:
+				D_ASSERT(leading_zero_position < max_leading_zeros_to_read);
+				leading_zero = leading_zeros[leading_zero_position++];
+				data_bit_count += Decompression::BIT_SIZE - leading_zero;
+				break;
+			}
+		}
+		D_ASSERT(packed_data_position == max_packed_data_to_read);
+		return data_bit_count;
 	}
 
 	void LoadValues(CHIMP_TYPE *result, idx_t count) {
@@ -126,7 +170,7 @@ public:
 	CHIMP_TYPE values[ChimpPrimitives::CHIMP_SEQUENCE_SIZE];
 
 private:
-	idx_t index;
+	idx_t index = 0;
 	idx_t max_leading_zeros_to_read;
 	idx_t max_flags_to_read;
 	idx_t max_packed_data_to_read;
@@ -148,13 +192,13 @@ public:
 		}
 		metadata = metadata.GetSubReader(0, metadata_end, "Chimp segment");
 
-		group_state.Init(metadata.GetBytes(ChimpPrimitives::HEADER_SIZE, metadata_end - ChimpPrimitives::HEADER_SIZE));
 		metadata.SetPosition(metadata_end);
 	}
 
 	BufferHandle handle;
 	CompressionSegmentReader metadata;
 	idx_t total_value_count = 0;
+	idx_t data_bit_position = 0;
 	ChimpGroupState<CHIMP_TYPE> group_state;
 
 	ColumnSegment &segment;
@@ -218,7 +262,12 @@ public:
 		group_state.LoadFlags(flags, flag_count);
 
 		// Load the leading zero blocks
-		group_state.LoadLeadingZeros(leading_zero_blocks, static_cast<idx_t>(leading_zero_block_count) * 8);
+		auto leading_zero_count = static_cast<idx_t>(leading_zero_block_count) * 8;
+		auto required_leading_zero_count = group_state.CalculateLeadingZeroCount();
+		if (leading_zero_count != required_leading_zero_count) {
+			ThrowChimpLeadingZeroCountMismatch(leading_zero_count, required_leading_zero_count);
+		}
+		group_state.LoadLeadingZeros(leading_zero_blocks, leading_zero_count);
 
 		// Load packed data blocks
 		auto packed_data_block_count = group_state.CalculatePackedDataCount();
@@ -227,10 +276,18 @@ public:
 		auto packed_data = metadata.ReadArrayBackward<uint16_t>(packed_data_block_count);
 		group_state.LoadPackedData(packed_data);
 
-		group_state.Reset();
+		// Validate the full group data range before using the unchecked bit reader
+		auto data_bit_count = group_state.ValidateAndCalculateDataBitCount(group_size);
+		auto bit_offset = UnsafeNumericCast<uint8_t>(data_bit_position & 7);
+		auto data_byte_position = data_bit_position >> 3;
+		auto data_byte_count = (static_cast<idx_t>(bit_offset) + data_bit_count + 7) / 8;
+		auto data = metadata.GetSubReader(ChimpPrimitives::HEADER_SIZE, metadata.Size() - ChimpPrimitives::HEADER_SIZE,
+		                                  "Chimp data");
+		group_state.Init(data.GetBytes(data_byte_position, data_byte_count), bit_offset);
 
 		// Load all values for the group
 		group_state.LoadValues(value_buffer, group_size);
+		data_bit_position += data_bit_count;
 	}
 
 public:
