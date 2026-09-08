@@ -238,11 +238,8 @@ public:
 		//! We can leave out the leading zero block count as well, because it can be derived from
 		//! Extracting all the flags and counting the 3's
 
-		// Load the offset indicating where a groups data starts
-		auto data_byte_offset = metadata.ReadBackward<uint32_t>();
-		D_ASSERT(data_byte_offset < segment.GetBlockSize());
-		//  Only used for point queries
-		(void)data_byte_offset;
+		// The stored group data offset is unused by scan and fetch
+		(void)metadata.ReadBackward<uint32_t>();
 
 		// Load how many blocks of leading zero bits we have
 		auto leading_zero_block_count = metadata.ReadBackward<uint8_t>();
