@@ -231,6 +231,9 @@ public:
 	}
 
 	void LoadGroup(CHIMP_TYPE *value_buffer) {
+		D_ASSERT(GroupFinished());
+		D_ASSERT(total_value_count < segment_count);
+
 		//! FIXME: If we change the order of this to flag -> leading_zero_blocks -> packed_data
 		//! We can leave out the leading zero block count as well, because it can be derived from
 		//! Extracting all the flags and counting the 3's
@@ -296,6 +299,8 @@ public:
 	void Skip(ColumnSegment &segment, idx_t skip_count) {
 		using INTERNAL_TYPE = typename ChimpType<T>::TYPE;
 		INTERNAL_TYPE buffer[ChimpPrimitives::CHIMP_SEQUENCE_SIZE];
+		D_ASSERT(total_value_count <= segment_count);
+		D_ASSERT(skip_count <= segment_count - total_value_count);
 
 		while (skip_count) {
 			auto skip_size = MinValue(skip_count, LeftInGroup());
@@ -321,6 +326,8 @@ void ChimpScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t scan
                       idx_t result_offset) {
 	using INTERNAL_TYPE = typename ChimpType<T>::TYPE;
 	auto &scan_state = state.scan_state->Cast<ChimpScanState<T>>();
+	D_ASSERT(scan_state.total_value_count <= scan_state.segment_count);
+	D_ASSERT(scan_count <= scan_state.segment_count - scan_state.total_value_count);
 
 	T *result_data = FlatVector::GetDataMutable<T>(result);
 	result.SetVectorType(VectorType::FLAT_VECTOR);
