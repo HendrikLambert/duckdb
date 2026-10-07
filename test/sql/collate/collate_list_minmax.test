@@ -1,0 +1,94 @@
+# name: test/sql/collate/collate_list_minmax.test
+# description: List min/max compare collated elements and preserve original values
+# group: [collate]
+
+query T
+SELECT list_min(['a' COLLATE NOCASE, 'B'])
+----
+a
+
+query T
+SELECT list_max(['a' COLLATE NOCASE, 'B'])
+----
+B
+
+query T
+SELECT list_min([{'x': 'a' COLLATE NOCASE}, {'x': 'B'}])
+----
+{'x': a}
+
+query T
+SELECT list_max([{'x': 'a' COLLATE NOCASE}, {'x': 'B'}])
+----
+{'x': B}
+
+query T
+SELECT list_max([('a' COLLATE NOCASE, 0), ('B', 0)])
+----
+(B, 0)
+
+query T
+SELECT list_max(array_value('a' COLLATE NOCASE, 'B'))
+----
+B
+
+query T
+SELECT list_max([{'x': ['a' COLLATE NOCASE]}, {'x': ['B']}])
+----
+{'x': [B]}
+
+# Normalizing a TIMETZ field must not change the returned value or its type.
+query T
+SELECT list_max([{'x': '10:00:00+00'::TIMETZ}, {'x': '09:00:00-05'::TIMETZ}]).x
+----
+09:00:00-05
+
+query T
+SELECT list_max([NULL, 'a' COLLATE NOCASE, 'B'])
+----
+B
+
+query T
+SELECT list_max([NULL::VARCHAR COLLATE NOCASE])
+----
+NULL
+
+query T
+SELECT list_max([{'x': 'a' COLLATE NOCASE}][1:0])
+----
+NULL
+
+query T
+SELECT list_max([{'x': 'a' COLLATE NOCASE}, {'x': NULL}])
+----
+{'x': NULL}
+
+# Several lists share a batch, but each keeps its own aggregate state.
+query T
+SELECT list_max([s COLLATE NOCASE, 'B']) FROM (VALUES (1, 'a'), (2, 'z'), (3, NULL)) t(id, s) ORDER BY id
+----
+B
+z
+B
+
+# The comparison expression is evaluated again when a list spans batches.
+query T
+SELECT list_max(list(CASE WHEN i = 2999 THEN 'B' ELSE 'a' END COLLATE NOCASE)) FROM range(3000) t(i)
+----
+B
+
+# Reusing the expression executor across input chunks must not retain earlier keys.
+query I
+SELECT count(*) FROM range(5000) t(i)
+WHERE list_max([(CASE WHEN i % 2 = 0 THEN 'a' ELSE 'z' END) COLLATE NOCASE, 'B']) COLLATE C = 'B'
+----
+2500
+
+# A default collation also applies when the element type has no explicit collation.
+statement ok
+SET default_collation = 'nocase'
+
+query T
+SELECT list_max(['a', 'B'])
+----
+B

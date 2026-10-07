@@ -1,0 +1,37 @@
+# name: test/sql/sql_export/list_aggregate.test
+# description: List aggregates retain SQL arguments separately from bound aggregate expressions
+# group: [sql_export]
+
+statement ok
+CREATE TABLE list_aggregate_input(strings VARCHAR[], numbers INTEGER[]);
+
+statement ok
+INSERT INTO list_aggregate_input VALUES (['a', 'B'], [3, 1, 2]);
+
+statement ok
+SET debug_verify_statement='explain_sql_strict';
+
+# Export the folded separator along with the list and aggregate name.
+query T
+SELECT list_aggregate(strings, 'string_agg', repeat('|', 2)) FROM list_aggregate_input;
+----
+a||B
+
+query I
+SELECT list_aggregate(numbers, 'quantile', 0.5) FROM list_aggregate_input;
+----
+2
+
+query T
+SELECT list_aggregate(numbers, 'min', 1) FROM list_aggregate_input;
+----
+[1]
+
+# The comparison key belongs to the inner aggregate, not the exported SQL arguments.
+statement ok
+SET default_collation='nocase';
+
+query T
+SELECT list_max(strings) FROM list_aggregate_input;
+----
+B

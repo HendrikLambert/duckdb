@@ -10,6 +10,7 @@
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/buffered_file_reader.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -31,6 +32,8 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
+
+#include <fstream>
 
 using namespace duckdb;
 
@@ -110,6 +113,71 @@ static void RequireSameValues(QueryResult &expected, QueryResult &actual) {
 }
 
 } // namespace
+
+TEST_CASE("List aggregates execute plans written before bound arguments were evaluated",
+          "[serialization][function_invocation]") {
+	string fixture_path = "test/api/serialized_plans/cases/list_aggregate_inputs";
+	std::ifstream sql_file(fixture_path + ".sql");
+	REQUIRE(sql_file.good());
+	vector<string> statements;
+	string line;
+	while (std::getline(sql_file, line)) {
+		if (!line.empty()) {
+			statements.push_back(line);
+		}
+	}
+	REQUIRE(!statements.empty());
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	connection.BeginTransaction();
+	for (idx_t i = 0; i + 1 < statements.size(); i++) {
+		REQUIRE_NO_FAIL(connection.Query(statements[i]));
+	}
+	auto &context = *connection.context;
+	BufferedFileReader source(db.GetFileSystem(), (fixture_path + ".bin").c_str());
+	BinaryDeserializer deserializer(source);
+	deserializer.Set<ClientContext &>(context);
+	deserializer.Begin();
+	auto plan = LogicalOperator::Deserialize(deserializer);
+	deserializer.End();
+
+	for (idx_t copy = 0; copy < 2; copy++) {
+		// Copy serializes the converted plan, so the element reference must survive another read.
+		auto next_plan = plan->Copy(context);
+		plan->ResolveOperatorTypes();
+		auto actual = connection.Query(make_uniq<LogicalPlanStatement>(std::move(plan)));
+		auto expected = connection.Query(statements.back());
+		REQUIRE_NO_FAIL(*expected);
+		RequireSameValues(*expected, *actual);
+		plan = std::move(next_plan);
+	}
+	connection.Rollback();
+}
+
+TEST_CASE("List aggregate serialization preserves rewritten inputs", "[serialization][function_invocation]") {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	REQUIRE_NO_FAIL(connection.Query("CREATE TABLE list_inputs(l VARCHAR[])"));
+	REQUIRE_NO_FAIL(connection.Query("INSERT INTO list_inputs VALUES (['a', 'B'])"));
+	REQUIRE_NO_FAIL(connection.Query("SET default_collation='nocase'"));
+	connection.BeginTransaction();
+	for (const auto &query :
+	     {"SELECT list_aggregate(l, 'string_agg', NULL) FROM list_inputs", "SELECT list_max(l) FROM list_inputs"}) {
+		INFO(query);
+		Parser parser(connection.context->GetParserOptions());
+		parser.ParseQuery(query);
+		Planner planner(*connection.context);
+		planner.CreatePlan(std::move(parser.statements[0]));
+		auto copy = planner.plan->Copy(*connection.context);
+		copy->ResolveOperatorTypes();
+		auto actual = connection.Query(make_uniq<LogicalPlanStatement>(std::move(copy)));
+		auto expected = connection.Query(query);
+		REQUIRE_NO_FAIL(*expected);
+		RequireSameValues(*expected, *actual);
+	}
+	connection.Rollback();
+}
 
 TEST_CASE("Table function bind data remains readable after removing its serialize callback",
           "[serialization][function_invocation][deserialize_only]") {

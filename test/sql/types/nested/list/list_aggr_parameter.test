@@ -21,7 +21,7 @@ SELECT list_aggr(list(i)::varchar[], 'string_agg', '|') FROM range(1, 4) tbl(i);
 statement error
 SELECT list_aggr([0, 1, 2, 3], 'arg_min', i) FROM range(1, 4) tbl(i);
 ----
-<REGEX>:.*Invalid Input Error.*extra arguments must be constant.*
+<REGEX>:.*Binder Error.*must be a constant expression.*
 
 # not enough arguments
 statement error
@@ -45,3 +45,31 @@ statement error
 SELECT list_aggr(list(i), 'quantile', i) FROM range(10) tbl(i);
 ----
 <REGEX>:.*Binder Error.*must be a constant expression.*
+
+# A NULL separator replaces the aggregate input with NULL during binding.
+query T
+SELECT list_aggr(['a', 'b'], 'string_agg', NULL);
+----
+NULL
+
+# A NULL list has no bound aggregate.
+query T
+SELECT list_aggr(NULL, 'string_agg', '|');
+----
+NULL
+
+statement ok
+PREPARE list_aggr_separator AS SELECT list_aggr(['a', 'b'], 'string_agg', $1);
+
+query T
+EXECUTE list_aggr_separator('|');
+----
+a|b
+
+query T
+EXECUTE list_aggr_separator('/');
+----
+a/b
+
+statement ok
+DEALLOCATE list_aggr_separator;
