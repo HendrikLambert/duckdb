@@ -13,7 +13,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/named_parameter_map.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/query_location.hpp"
+#include "duckdb/parser/sql_render_context.hpp"
 
 namespace duckdb {
 
@@ -38,12 +40,22 @@ public:
 	bool has_anonymous_parameters = false;
 	//! The query text that corresponds to this SQL statement
 	string query;
+	//! Redacted query text for logging, absent when the original query can be used.
+	optional<string> log_query;
 
 protected:
 	SQLStatement(const SQLStatement &other) = default;
 
 public:
+	//! Prefer ToString(context) to support context-aware rendering.
 	virtual string ToString() const = 0;
+	//! Probes return no SQL and report changes through the shared context.
+	virtual string ToString(SQLRenderContext &context) const {
+		if (context.probe_only) {
+			return string();
+		}
+		return ToString();
+	}
 	//! Create a copy of this SelectStatement
 	DUCKDB_API virtual unique_ptr<SQLStatement> Copy() const = 0;
 
