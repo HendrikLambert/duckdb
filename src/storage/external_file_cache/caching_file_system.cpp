@@ -76,9 +76,11 @@ void TightenCacheDeadline(optional<timestamp_t> &cached, const optional<timestam
 class FetchBlockTask : public BaseExecutorTask {
 public:
 	FetchBlockTask(CachingFileHandle &caching_file_handle_p, TaskExecutor &executor, QueryContext context_p,
-	               BufferManager &buffer_manager_p, shared_ptr<CacheBlock> block_p, BufferHandle &result_pin_p)
+	               BufferManager &buffer_manager_p, shared_ptr<CacheBlock> block_p, BufferHandle &result_pin_p,
+	               idx_t file_size_p)
 	    : BaseExecutorTask(executor), caching_file_handle(caching_file_handle_p), context(context_p),
-	      buffer_manager(buffer_manager_p), block(std::move(block_p)), result_pin(result_pin_p) {
+	      buffer_manager(buffer_manager_p), block(std::move(block_p)), result_pin(result_pin_p),
+	      file_size(file_size_p) {
 	}
 
 	void ExecuteTask() override {
@@ -104,7 +106,6 @@ public:
 				lk.unlock();
 
 				try {
-					const idx_t file_size = caching_file_handle.GetFileSize();
 					const idx_t offset = block->location;
 					if (offset >= file_size) {
 						lk.lock();
@@ -164,6 +165,7 @@ private:
 	BufferManager &buffer_manager;
 	shared_ptr<CacheBlock> block;
 	BufferHandle &result_pin;
+	idx_t file_size;
 };
 
 //===----------------------------------------------------------------------===//
@@ -446,7 +448,7 @@ FileBufferHandleGroup CachingFileHandle::Read(const idx_t nr_bytes, const idx_t 
 
 	for (idx_t idx = 0; idx < num_blocks; idx++) {
 		executor.ScheduleTask(make_uniq<FetchBlockTask>(
-		    *this, executor, context, external_file_cache.GetBufferManager(), blocks[idx], pins[idx]));
+		    *this, executor, context, external_file_cache.GetBufferManager(), blocks[idx], pins[idx], file_size));
 	}
 	executor.WorkOnTasks();
 
