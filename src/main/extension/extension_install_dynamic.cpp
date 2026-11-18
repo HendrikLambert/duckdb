@@ -244,7 +244,7 @@ static unique_ptr<HTTPResponse> RequestExtension(DatabaseInstance &db, optional_
 
 //! Whether a failed response means the server itself is unavailable, as opposed to e.g. the extension not existing
 static bool ServerUnavailable(const HTTPResponse &response) {
-	if (response.HasRequestError()) {
+	if (response.HasTransportError()) {
 		// the request never completed: DNS failure, connection refused, timeout, ...
 		return true;
 	}
@@ -297,10 +297,10 @@ InstallFromHttpUrl(DatabaseInstance &db, const string &url, const string &extens
 		if (!documentation_link.empty()) {
 			message += "\nFor more info, visit " + documentation_link;
 		}
-		if (response->HasRequestError()) {
+		if (response->HasTransportError()) {
 			// request error - this means something went wrong performing the request
 			throw IOException("Failed to download extension \"%s\" at URL \"%s\"\n%s (ERROR %s)", extension_name, url,
-			                  message, response->GetRequestError());
+			                  message, response->GetTransportError().message);
 		}
 		// if this was not a request error this means the server responded - report the response status and response
 		throw HTTPException(*response, "Failed to download extension \"%s\" at URL \"%s\" (HTTP %n)\n%s",

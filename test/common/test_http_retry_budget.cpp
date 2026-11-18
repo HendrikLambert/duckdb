@@ -815,13 +815,13 @@ TEST_CASE("A returned transport error carries the quota exhaustion note where Ge
 	    [&]() {
 		    sends++;
 		    auto failed = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-		    failed->request_error = "Connection reset by peer";
+		    failed->SetTransportError({HTTPTransportErrorType::UNKNOWN, "Connection reset by peer"});
 		    return failed;
 	    },
 	    request, {});
 	REQUIRE(sends == 2);
 	REQUIRE_FALSE(response->Success());
-	REQUIRE(response->HasRequestError());
+	REQUIRE(response->HasTransportError());
 	REQUIRE(StringUtil::Contains(response->GetError(), "Connection reset by peer"));
 	REQUIRE(StringUtil::Contains(response->GetError(), "retry quota for 'http://flaky.example.com' exhausted"));
 	REQUIRE(quota->Available() == 0);
@@ -853,13 +853,13 @@ TEST_CASE("A returned HTTP error with the quota exhaustion note still parses as 
 		response = HTTPUtil::RunRequestWithRetry(
 		    [&]() {
 			    auto failed = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			    failed->request_error = error_sent.what();
+			    failed->SetTransportError({HTTPTransportErrorType::UNKNOWN, error_sent.what()});
 			    return failed;
 		    },
 		    request, {});
 	}
-	REQUIRE(response->HasRequestError());
-	ErrorData error(response->GetRequestError());
+	REQUIRE(response->HasTransportError());
+	ErrorData error(response->GetTransportError().message);
 	REQUIRE(error.Type() == ExceptionType::HTTP);
 	REQUIRE(error.ExtraInfo().at("status_code") == "429");
 	REQUIRE(error.ExtraInfo().at("header_ETag") == "W/\"bf-0ojpck62M0d8\"");

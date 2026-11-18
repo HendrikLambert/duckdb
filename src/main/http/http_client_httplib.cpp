@@ -101,7 +101,7 @@ private:
 			return TransformResponse(response);
 		} else {
 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->request_error = to_string(res.error());
+			result->SetTransportError({HTTPTransportErrorType::UNKNOWN, to_string(res.error())});
 			return result;
 		}
 	}

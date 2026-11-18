@@ -181,6 +181,25 @@ private:
 	header_map_t headers;
 };
 
+//! The kind of transport failure of a request, if any
+enum class HTTPTransportErrorType : uint8_t {
+	//! No transport failure
+	NONE,
+	//! Failed for a reason the transport did not classify
+	UNKNOWN,
+	//! Connecting or transferring took too long
+	TIMEOUT,
+	//! The host could not be resolved or connected to
+	CONNECT,
+	//! The TLS handshake or the certificate verification failed
+	TLS
+};
+
+struct HTTPTransportError {
+	HTTPTransportErrorType type = HTTPTransportErrorType::NONE;
+	string message;
+};
+
 struct HTTPResponse {
 	explicit HTTPResponse(HTTPStatusCode code);
 	// Out-of-line so the symbol is emitted/exported for loadable (WASM side-module) extensions.
@@ -189,9 +208,9 @@ struct HTTPResponse {
 	HTTPStatusCode status;
 	string url;
 	string body;
-	string request_error;
 	string reason;
 	HTTPHeaders headers;
+	// FIXME: remove, derive Success() from the transport error and the status
 	bool success = true;
 
 public:
@@ -200,11 +219,19 @@ public:
 
 	bool Success() const;
 
-	bool HasRequestError() const;
-	const string &GetRequestError() const;
+	//! Marks the request as failed without a complete response
+	void SetTransportError(HTTPTransportError error);
+	bool HasTransportError() const;
+	const HTTPTransportError &GetTransportError() const;
 	const string &GetError() const;
 
+	[[deprecated("Use HasTransportError instead")]] bool HasRequestError() const;
+	[[deprecated("Use GetTransportError().message instead")]] const string &GetRequestError() const;
+
 	bool ShouldRetry() const;
+
+private:
+	HTTPTransportError transport_error;
 };
 
 struct BaseRequest {
