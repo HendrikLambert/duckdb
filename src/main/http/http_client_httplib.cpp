@@ -20,6 +20,24 @@
 
 namespace duckdb {
 
+static HTTPTransportErrorType GetTransportErrorType(duckdb_httplib::Error error) {
+	switch (error) {
+	case duckdb_httplib::Error::ConnectionTimeout:
+	case duckdb_httplib::Error::Timeout:
+		return HTTPTransportErrorType::TIMEOUT;
+	case duckdb_httplib::Error::Connection:
+	case duckdb_httplib::Error::ProxyConnection:
+		return HTTPTransportErrorType::CONNECT;
+	case duckdb_httplib::Error::SSLConnection:
+	case duckdb_httplib::Error::SSLLoadingCerts:
+	case duckdb_httplib::Error::SSLServerVerification:
+	case duckdb_httplib::Error::SSLServerHostnameVerification:
+		return HTTPTransportErrorType::TLS;
+	default:
+		return HTTPTransportErrorType::UNKNOWN;
+	}
+}
+
 class HTTPLibClient : public HTTPClient {
 public:
 	HTTPLibClient(HTTPParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
@@ -101,7 +119,7 @@ private:
 			return TransformResponse(response);
 		} else {
 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->SetTransportError({HTTPTransportErrorType::UNKNOWN, to_string(res.error())});
+			result->SetTransportError({GetTransportErrorType(res.error()), to_string(res.error())});
 			return result;
 		}
 	}
