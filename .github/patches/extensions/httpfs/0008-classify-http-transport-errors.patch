@@ -1,0 +1,95 @@
+diff --git a/src/http/httpfs_curl_client.cpp b/src/http/httpfs_curl_client.cpp
+index c0c0f2b..ed015c6 100644
+--- a/src/http/httpfs_curl_client.cpp
++++ b/src/http/httpfs_curl_client.cpp
+@@ -169,6 +169,39 @@ CURLURLHandle::~CURLURLHandle() {
+ 	curl_url_cleanup(handle);
+ }
+ 
++static HTTPTransportError GetTransportError(CURLcode result, int os_errno) {
++	HTTPTransportError error;
++	switch (result) {
++	case CURLE_OPERATION_TIMEDOUT:
++		error.type = HTTPTransportErrorType::TIMEOUT;
++		break;
++	case CURLE_COULDNT_RESOLVE_PROXY:
++	case CURLE_COULDNT_RESOLVE_HOST:
++	case CURLE_COULDNT_CONNECT:
++#if LIBCURL_VERSION_NUM >= 0x074900 // 7.73.0: CURLE_PROXY available
++	case CURLE_PROXY:
++#endif
++		error.type = HTTPTransportErrorType::CONNECT;
++		break;
++	case CURLE_SSL_CONNECT_ERROR:
++	case CURLE_PEER_FAILED_VERIFICATION:
++	case CURLE_SSL_CERTPROBLEM:
++	case CURLE_SSL_CIPHER:
++	case CURLE_SSL_CACERT_BADFILE:
++	case CURLE_SSL_CRL_BADFILE:
++	case CURLE_SSL_ISSUER_ERROR:
++	case CURLE_SSL_PINNEDPUBKEYNOTMATCH:
++	case CURLE_SSL_INVALIDCERTSTATUS:
++		error.type = HTTPTransportErrorType::TLS;
++		break;
++	default:
++		error.type = HTTPTransportErrorType::UNKNOWN;
++		break;
++	}
++	error.message = HTTPFSUtil::DescribeRequestError(curl_easy_strerror(result), os_errno);
++	return error;
++}
++
+ struct RequestInfo {
+ 	string url = "";
+ 	string body = "";
+@@ -769,9 +802,7 @@ private:
+ 			if (os_errno == 0) {
+ 				os_errno = curl->GetExecuteErrno();
+ 			}
+-			response->SetTransportError(
+-			    {HTTPTransportErrorType::UNKNOWN,
+-			     HTTPFSUtil::DescribeRequestError(curl_easy_strerror(res), static_cast<int>(os_errno))});
++			response->SetTransportError(GetTransportError(res, static_cast<int>(os_errno)));
+ 			return response;
+ 		}
+ 		if (include_body) {
+diff --git a/src/http/httpfs_httplib_client.cpp b/src/http/httpfs_httplib_client.cpp
+index db97e62..1840961 100644
+--- a/src/http/httpfs_httplib_client.cpp
++++ b/src/http/httpfs_httplib_client.cpp
+@@ -7,6 +7,24 @@
+ 
+ namespace duckdb {
+ 
++static HTTPTransportErrorType GetTransportErrorType(duckdb_httplib_openssl::Error error) {
++	switch (error) {
++	case duckdb_httplib_openssl::Error::ConnectionTimeout:
++	case duckdb_httplib_openssl::Error::Timeout:
++		return HTTPTransportErrorType::TIMEOUT;
++	case duckdb_httplib_openssl::Error::Connection:
++	case duckdb_httplib_openssl::Error::ProxyConnection:
++		return HTTPTransportErrorType::CONNECT;
++	case duckdb_httplib_openssl::Error::SSLConnection:
++	case duckdb_httplib_openssl::Error::SSLLoadingCerts:
++	case duckdb_httplib_openssl::Error::SSLServerVerification:
++	case duckdb_httplib_openssl::Error::SSLServerHostnameVerification:
++		return HTTPTransportErrorType::TLS;
++	default:
++		return HTTPTransportErrorType::UNKNOWN;
++	}
++}
++
+ class HTTPFSClient : public HTTPClient {
+ private:
+ 	class GetTransferState {
+@@ -284,8 +302,8 @@ private:
+ 			return TransformResponse(response);
+ 		} else {
+ 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+-			result->SetTransportError(
+-			    {HTTPTransportErrorType::UNKNOWN, HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno)});
++			result->SetTransportError({GetTransportErrorType(res.error()),
++			                           HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno)});
+ 			return result;
+ 		}
+ 	}
