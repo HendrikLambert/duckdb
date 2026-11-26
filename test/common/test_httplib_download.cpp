@@ -82,10 +82,10 @@ TEST_CASE("Built-in HTTP client downloads responses larger than 100 MiB", "[http
 	auto response = client->Get(request);
 	REQUIRE(response);
 	if (truncated) {
-		CHECK(response->HasRequestError());
-		CHECK(response->GetRequestError() == "Failed to read connection");
+		REQUIRE(response->HasTransportError());
+		CHECK(response->GetTransportError().message == "Failed to read connection");
 	} else {
-		REQUIRE(!response->HasRequestError());
+		REQUIRE(!response->HasTransportError());
 		CHECK(response->status == HTTPStatusCode::OK_200);
 		CHECK(response->body.size() == response_length);
 		CHECK(response->body.find_first_not_of('x') == string::npos);
