@@ -1,0 +1,185 @@
+diff --git a/src/hffs.cpp b/src/hffs.cpp
+index e3b3aec..fb166ab 100644
+--- a/src/hffs.cpp
++++ b/src/hffs.cpp
+@@ -74,7 +74,7 @@ string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPRequestS
+ 	    });
+ 	auto res = session.Request(get_request);
+ 	if (res->HasRequestError()) {
+-		throw IOException(res->GetRequestError() + " error for HTTP GET to '" + next_page_url + "'");
++		throw IOException(res->GetRequestError().message + " error for HTTP GET to '" + next_page_url + "'");
+ 	}
+ 	if (res->status != HTTPStatusCode::OK_200) {
+ 		throw HTTPFSUtil::GetHTTPStatusError(*res, RequestType::GET_REQUEST, "listing", next_page_url);
+diff --git a/src/http/http_request.cpp b/src/http/http_request.cpp
+index 7979a9b..59d04ca 100644
+--- a/src/http/http_request.cpp
++++ b/src/http/http_request.cpp
+@@ -118,7 +118,7 @@ static void SetRangeRequestNotSupported(HTTPResponse &response) {
+ 	try {
+ 		RangeRequestNotSupportedException::Throw();
+ 	} catch (HTTPException &ex) {
+-		response.request_error = ex.what();
++		response.SetRequestError({HTTPRequestErrorType::PROCESSING, ex.what()});
+ 		response.success = false;
+ 	}
+ }
+diff --git a/src/http/httpfs.cpp b/src/http/httpfs.cpp
+index acaf404..f319bca 100644
+--- a/src/http/httpfs.cpp
++++ b/src/http/httpfs.cpp
+@@ -393,7 +393,7 @@ static bool RespondedWithRangeRequestNotSupported(const HTTPResponse &res) {
+ 	if (!res.HasRequestError()) {
+ 		return false;
+ 	}
+-	ErrorData error(res.GetRequestError());
++	ErrorData error(res.GetRequestError().message);
+ 	return error.Type() == RangeRequestNotSupportedException::TYPE &&
+ 	       error.RawMessage() == RangeRequestNotSupportedException::MESSAGE;
+ }
+@@ -413,7 +413,7 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, const string &url, cons
+ 			if (RespondedWithRangeRequestNotSupported(*res) && read_config.auto_fallback_to_full_download) {
+ 				return false;
+ 			}
+-			ErrorData error(res->GetRequestError());
++			ErrorData error(res->GetRequestError().message);
+ 			error.Throw();
+ 		}
+ 
+@@ -694,7 +694,7 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
+ 		auto full_download_result = GetRequest(hfh, hfh.path, {}, read_config, *download);
+ 		ThrowIfReadConditionFailed(hfh, read_config, *full_download_result);
+ 		if (full_download_result->HasRequestError()) {
+-			ErrorData(full_download_result->GetRequestError()).Throw();
++			ErrorData(full_download_result->GetRequestError().message).Throw();
+ 		}
+ 		if (!hfh.initialized && hfh.flags.ReturnNullIfNotExists() &&
+ 		    full_download_result->status == HTTPStatusCode::NotFound_404) {
+@@ -1052,7 +1052,7 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
+ 	if (response->HasRequestError()) {
+ 		// The range handler turns error statuses into exceptions, which the request reports as a request error with
+ 		// no status - recover the original error (and its status) instead of reporting HTTP 0
+-		ErrorData error(response->GetRequestError());
++		ErrorData error(response->GetRequestError().message);
+ 		auto status_entry = error.ExtraInfo().find("status_code");
+ 		if (flags.ReturnNullIfNotExists() && status_entry != error.ExtraInfo().end() && status_entry->second == "404") {
+ 			file_not_found = true;
+diff --git a/src/http/httpfs_curl_client.cpp b/src/http/httpfs_curl_client.cpp
+index 3c9565c..b44f557 100644
+--- a/src/http/httpfs_curl_client.cpp
++++ b/src/http/httpfs_curl_client.cpp
+@@ -769,8 +769,9 @@ private:
+ 			if (os_errno == 0) {
+ 				os_errno = curl->GetExecuteErrno();
+ 			}
+-			response->request_error =
+-			    HTTPFSUtil::DescribeRequestError(curl_easy_strerror(res), static_cast<int>(os_errno));
++			response->SetRequestError(
++			    {HTTPRequestErrorType::UNKNOWN,
++			     HTTPFSUtil::DescribeRequestError(curl_easy_strerror(res), static_cast<int>(os_errno))});
+ 			return response;
+ 		}
+ 		if (include_body) {
+diff --git a/src/http/httpfs_httplib_client.cpp b/src/http/httpfs_httplib_client.cpp
+index 8534f03..3a2c5c4 100644
+--- a/src/http/httpfs_httplib_client.cpp
++++ b/src/http/httpfs_httplib_client.cpp
+@@ -284,7 +284,8 @@ private:
+ 			return TransformResponse(response);
+ 		} else {
+ 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+-			result->request_error = HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno);
++			result->SetRequestError(
++			    {HTTPRequestErrorType::UNKNOWN, HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno)});
+ 			return result;
+ 		}
+ 	}
+diff --git a/src/s3/s3_delete.cpp b/src/s3/s3_delete.cpp
+index 8c86722..e6a2cd9 100644
+--- a/src/s3/s3_delete.cpp
++++ b/src/s3/s3_delete.cpp
+@@ -95,7 +95,7 @@ void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opene
+ 	auto &res = request_result.response;
+ 	if (res->HasRequestError()) {
+ 		throw IOException("S3 delete request for \"%s\" could not be completed: %s", request_result.context.display_url,
+-		                  res->GetRequestError());
++		                  res->GetRequestError().message);
+ 	}
+ 	if (res->status != HTTPStatusCode::OK_200 && res->status != HTTPStatusCode::NoContent_204) {
+ 		throw S3RequestUtil::GetRequestError(request_result.context, *res);
+@@ -355,7 +355,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
+ 
+ 			if (res->HasRequestError()) {
+ 				throw IOException("S3 bulk delete request for \"%s\" could not be completed: %s",
+-				                  request_context.display_url, res->GetRequestError());
++				                  request_context.display_url, res->GetRequestError().message);
+ 			}
+ 			if (res->status != HTTPStatusCode::OK_200) {
+ 				throw S3RequestUtil::GetRequestError(request_context, *res);
+diff --git a/src/s3/s3_list.cpp b/src/s3/s3_list.cpp
+index 317a8b3..3fdf028 100644
+--- a/src/s3/s3_list.cpp
++++ b/src/s3/s3_list.cpp
+@@ -496,7 +496,7 @@ struct S3ListRequest {
+ 			auto display_url = request_context.display_url;
+ 			StringUtil::RTrim(display_url, "/");
+ 			if (response->HasRequestError()) {
+-				throw IOException("%s error for HTTP GET to '%s'", response->GetRequestError(), display_url);
++				throw IOException("%s error for HTTP GET to '%s'", response->GetRequestError().message, display_url);
+ 			}
+ 			throw S3RequestUtil::GetRequestError(request_context, *response);
+ 		}
+diff --git a/src/s3/s3_upload_session.cpp b/src/s3/s3_upload_session.cpp
+index b563d27..6266c56 100644
+--- a/src/s3/s3_upload_session.cpp
++++ b/src/s3/s3_upload_session.cpp
+@@ -461,7 +461,7 @@ S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation,
+ 	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query);
+ 	if (result.response->HasRequestError()) {
+ 		throw IOException("S3 upload request for \"%s\" could not be completed: %s", result.context.display_url,
+-		                  result.response->GetRequestError());
++		                  result.response->GetRequestError().message);
+ 	}
+ 	return result;
+ }
+diff --git a/test/unittest/http/connection_reuse_test.cpp b/test/unittest/http/connection_reuse_test.cpp
+index 5a0f329..85d8e17 100644
+--- a/test/unittest/http/connection_reuse_test.cpp
++++ b/test/unittest/http/connection_reuse_test.cpp
+@@ -55,12 +55,12 @@ static void RunCurlTerminalTransportErrorIsNotReused() {
+ 	failed_request.try_request = true;
+ 	auto failed_response = session.Request(failed_request);
+ 	REQUIRE(failed_response);
+-	REQUIRE(failed_response->HasRequestError());
++	REQUIRE(failed_response->HasTransportError());
+ 
+ 	HeadRequestInfo completed_error_request(server.HTTPPath(), HTTPHeaders(), params);
+ 	auto completed_error_response = session.Request(completed_error_request);
+ 	REQUIRE(completed_error_response);
+-	REQUIRE_FALSE(completed_error_response->HasRequestError());
++	REQUIRE_FALSE(completed_error_response->HasTransportError());
+ 	REQUIRE(completed_error_response->status == HTTPStatusCode::NotFound_404);
+ 
+ 	auto hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
+@@ -71,7 +71,7 @@ static void RunCurlTerminalTransportErrorIsNotReused() {
+ 	HeadRequestInfo reused_error_request(server.HTTPPath(), HTTPHeaders(), params);
+ 	auto reused_error_response = session.Request(reused_error_request);
+ 	REQUIRE(reused_error_response);
+-	REQUIRE_FALSE(reused_error_response->HasRequestError());
++	REQUIRE_FALSE(reused_error_response->HasTransportError());
+ 	REQUIRE(reused_error_response->status == HTTPStatusCode::NotFound_404);
+ 
+ 	hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
+diff --git a/test/unittest/http/http_request_session_test.cpp b/test/unittest/http/http_request_session_test.cpp
+index ff26cf9..37c0ae8 100644
+--- a/test/unittest/http/http_request_session_test.cpp
++++ b/test/unittest/http/http_request_session_test.cpp
+@@ -184,7 +184,7 @@ TEST_CASE("HTTP transport retries bypass the client cache", "[httpfs][request-se
+ 		requests++;
+ 		if (requests == 1) {
+ 			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+-			response->request_error = "stale connection";
++			response->SetRequestError({HTTPRequestErrorType::UNKNOWN, "stale connection"});
+ 			return response;
+ 		}
+ 		REQUIRE(lifecycle.extended_client_initializations == 1);

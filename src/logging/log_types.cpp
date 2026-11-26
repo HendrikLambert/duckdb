@@ -301,7 +301,7 @@ string HTTPLogType::ConstructLogMessage(BaseRequest &request, optional_ptr<HTTPR
 	if (response) {
 		child_list_t<Value> response_child_list = {
 		    {"status", Value(HTTPStatusToLogString(response->status))},
-		    {"reason", Value(response->reason.empty() ? response->GetTransportError().message : response->reason)},
+		    {"reason", Value(response->reason.empty() ? response->GetRequestError().message : response->reason)},
 		    {"headers", CreateHTTPHeadersValue(response->headers, HTTPResponseHeaderAllowList(), redact_http_logs)},
 		};
 		response_value = Value::STRUCT(response_child_list);

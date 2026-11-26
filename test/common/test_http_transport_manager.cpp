@@ -258,7 +258,7 @@ public:
 		}
 		case MockResponseMode::REQUEST_ERROR: {
 			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			response->SetTransportError({HTTPTransportErrorType::UNKNOWN, "mock request error"});
+			response->SetRequestError({HTTPRequestErrorType::TRANSPORT, "mock request error"});
 			return response;
 		}
 		case MockResponseMode::HTTP_ERROR:
@@ -728,9 +728,15 @@ TEST_CASE("HTTP transport manager synchronous session API", "[http_transport_man
 		auto session = manager->CreateSession(nullptr, nullptr);
 		REQUIRE(RunManagedRequest(session, session.Parameters(), "https://healthy.example.com/"));
 		provider->state->response_mode = MockResponseMode::REQUEST_ERROR;
+		SECTION("Transport failure") {
+		}
+		SECTION("Processing failure") {
+			provider->state->response_mode = MockResponseMode::CLIENT_THROW;
+		}
 		auto response = RunManagedRequest(session, session.Parameters(), "https://failing.example.com/");
 		REQUIRE(response);
-		CHECK(response->HasTransportError());
+		CHECK(response->HasRequestError());
+		CHECK(response->HasTransportError() == (provider->state->response_mode == MockResponseMode::REQUEST_ERROR));
 		CHECK(provider->state->live == 1);
 		CHECK(HTTPTransportManagerTestHelper::OccupiedSlots(*manager) == 1);
 		session.Invalidate();

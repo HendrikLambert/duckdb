@@ -108,30 +108,34 @@ bool HTTPResponse::Success() const {
 	return success;
 }
 
-void HTTPResponse::SetTransportError(HTTPTransportError error) {
-	D_ASSERT(error.type != HTTPTransportErrorType::NONE);
+void HTTPResponse::SetRequestError(HTTPRequestError error) {
+	D_ASSERT(error.type != HTTPRequestErrorType::NONE);
 	D_ASSERT(!error.message.empty());
-	transport_error = std::move(error);
-}
-
-bool HTTPResponse::HasTransportError() const {
-	return transport_error.type != HTTPTransportErrorType::NONE;
-}
-
-const HTTPTransportError &HTTPResponse::GetTransportError() const {
-	return transport_error;
+	request_error = std::move(error);
 }
 
 bool HTTPResponse::HasRequestError() const {
-	return HasTransportError();
+	return request_error.type != HTTPRequestErrorType::NONE;
 }
 
-const string &HTTPResponse::GetRequestError() const {
-	return transport_error.message;
+bool HTTPResponse::HasTransportError() const {
+	switch (request_error.type) {
+	case HTTPRequestErrorType::TRANSPORT:
+	case HTTPRequestErrorType::TIMEOUT:
+	case HTTPRequestErrorType::CONNECT:
+	case HTTPRequestErrorType::TLS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+const HTTPRequestError &HTTPResponse::GetRequestError() const {
+	return request_error;
 }
 
 const string &HTTPResponse::GetError() const {
-	return HasTransportError() ? transport_error.message : reason;
+	return HasRequestError() ? request_error.message : reason;
 }
 
 HTTPUtil::HTTPUtil() {
@@ -151,7 +155,7 @@ HTTPTransportReusePolicy HTTPUtil::GetTransportReusePolicy() const {
 
 bool HTTPResponse::ShouldRetry() const {
 	if (HasTransportError()) {
-		// request errors are eligible for retry
+		// transport errors are eligible for retry
 		return true;
 	}
 	// Core judges by status only; what a service says in the body is the provider's call (HTTPUtil::ShouldRetry).
@@ -289,7 +293,7 @@ unique_ptr<HTTPResponse> HTTPUtil::SendRequestOnce(BaseRequest &request, HTTPCli
 		LogRequest(request, nullptr);
 		throw;
 	}
-	if (!response || response->HasTransportError()) {
+	if (!response || response->HasRequestError()) {
 		retry_cache_policy = HTTPClientCachePolicy::BYPASS_CACHE;
 	}
 	request.request_monotonic_end = TimePoint::Tick();
@@ -522,14 +526,15 @@ HTTPUtil::RunRequestWithRetry(const std::function<unique_ptr<HTTPResponse>(void)
 			    // A thrown status is judged like a received one, provider rules included.
 			    should_retry = params.http_util.ShouldRetry(request, *caught_response);
 		    } else {
-			    // Without a status the transport failed and nothing is known about the server.
+			    // Exceptions without an HTTP status are eligible for retry.
 			    should_retry = true;
 		    }
 		    if (!should_retry) {
 			    if (response) {
 				    auto response_code = static_cast<uint16_t>(response->status);
-				    response->success = (response_code >= 200 && response_code < 300) ||
-				                        response->status == HTTPStatusCode::NotModified_304;
+				    response->success =
+				        !response->HasRequestError() && ((response_code >= 200 && response_code < 300) ||
+				                                         response->status == HTTPStatusCode::NotModified_304);
 			    }
 			    return HTTPRetryDecision::Finish();
 		    }
@@ -537,7 +542,7 @@ HTTPUtil::RunRequestWithRetry(const std::function<unique_ptr<HTTPResponse>(void)
 			    return HTTPRetryDecision::Finish();
 		    }
 		    if (!response && !caught_response) {
-			    // The transport failed before any status arrived: nothing is known about the server.
+			    // Without a response, charge the transient retry cost.
 			    return HTTPRetryDecision::Transient();
 		    }
 		    auto &judged = response ? *response : *caught_response;
@@ -569,15 +574,15 @@ HTTPUtil::RunRequestWithRetry(const std::function<unique_ptr<HTTPResponse>(void)
 	if (request.try_request) {
 		if (!response) {
 			response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			response->SetTransportError({HTTPTransportErrorType::UNKNOWN,
-			                             exception_error.empty() ? "Unknown error" : std::move(exception_error)});
+			response->SetRequestError({HTTPRequestErrorType::PROCESSING,
+			                           exception_error.empty() ? "Unknown error" : std::move(exception_error)});
 		}
 		if (!quota_note.empty()) {
-			// A received error keeps its status; the note goes to the field GetError() reports.
-			if (response->HasTransportError()) {
-				auto error = response->GetTransportError();
+			// A received error keeps its status, the note goes to the field GetError() reports.
+			if (response->HasRequestError()) {
+				auto error = response->GetRequestError();
 				error.message = AppendToRequestError(error.message, quota_note);
-				response->SetTransportError(std::move(error));
+				response->SetRequestError(std::move(error));
 			} else {
 				response->reason += quota_note;
 			}
@@ -596,7 +601,7 @@ HTTPUtil::RunRequestWithRetry(const std::function<unique_ptr<HTTPResponse>(void)
 		}
 		throw IOException(caught_error.ExtraInfo(), caught_error.RawMessage() + quota_note);
 	}
-	if (response && !response->HasTransportError()) {
+	if (response && !response->HasRequestError()) {
 		throw HTTPException(*response, "Request returned HTTP %d for HTTP %s to '%s'%s",
 		                    static_cast<int>(response->status), method, request.url, quota_note);
 	}

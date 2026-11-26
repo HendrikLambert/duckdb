@@ -489,6 +489,137 @@ TEST_CASE("Core retries a final-looking status only when the provider says so", 
 	REQUIRE(run_sends(provider_util, S3_INVALID_PART_BODY, true) == 1);
 }
 
+TEST_CASE("HTTP handler exceptions preserve diagnostics without becoming transport errors", "[http]") {
+	HTTPUtil http_util;
+	HTTPParams params(http_util);
+	params.retries = 2;
+	params.retry_wait_ms = 0;
+	HTTPStatusCode status = HTTPStatusCode::NotFound_404;
+	SECTION("An error status rejected by the handler") {
+	}
+	SECTION("A successful status rejected by validation") {
+		status = HTTPStatusCode::PartialContent_206;
+	}
+	HTTPResponse received(status);
+	received.reason = HTTPUtil::GetStatusMessage(status);
+	received.body = "response body";
+	received.headers.Set("ETag", "original-etag");
+	HTTPException expected(received, "Response rejected by the handler");
+	GetRequestInfo request(
+	    "http://example.com/file", HTTPHeaders(), params,
+	    [&](const HTTPResponse &response) -> bool {
+		    throw HTTPException(response, "Response rejected by the handler");
+	    },
+	    nullptr);
+	request.try_request = true;
+	idx_t sends = 0;
+	auto send = [&]() -> unique_ptr<HTTPResponse> {
+		sends++;
+		request.response_handler(received);
+		return nullptr;
+	};
+	auto response = HTTPUtil::RunRequestWithRetry(send, request, {});
+	REQUIRE(sends == 1);
+	REQUIRE_FALSE(response->Success());
+	REQUIRE(response->status == HTTPStatusCode::INVALID);
+	ErrorData error(response->GetError());
+	ErrorData expected_error(expected);
+	REQUIRE(error.Type() == expected_error.Type());
+	REQUIRE(error.RawMessage() == expected_error.RawMessage());
+	REQUIRE(error.ExtraInfo() == expected_error.ExtraInfo());
+	REQUIRE(response->HasRequestError());
+	REQUIRE(response->GetRequestError().type == HTTPRequestErrorType::PROCESSING);
+	REQUIRE_FALSE(response->HasTransportError());
+
+	request.try_request = false;
+	REQUIRE_THROWS_WITH(HTTPUtil::RunRequestWithRetry(send, request, {}),
+	                    Catch::Contains("Response rejected by the handler"));
+	REQUIRE(sends == 2);
+}
+
+TEST_CASE("Captured request failures without HTTP metadata are processing errors", "[http]") {
+	HTTPUtil http_util;
+	HTTPParams params(http_util);
+	params.retries = 1;
+	params.retry_wait_ms = 0;
+	HeadRequestInfo request("http://example.com/file", HTTPHeaders(), params);
+	request.try_request = true;
+	string message;
+	SECTION("HTTP exception without a response") {
+		message = HTTPException("Response processing failed").what();
+	}
+	SECTION("IO exception") {
+		message = IOException("Response processing failed").what();
+	}
+	SECTION("Provider returned no response") {
+	}
+	idx_t sends = 0;
+	auto response = HTTPUtil::RunRequestWithRetry(
+	    [&]() -> unique_ptr<HTTPResponse> {
+		    sends++;
+		    if (!message.empty()) {
+			    throw std::runtime_error(message);
+		    }
+		    return nullptr;
+	    },
+	    request, {});
+	REQUIRE(sends == 2);
+	REQUIRE_FALSE(response->Success());
+	REQUIRE(response->HasRequestError());
+	REQUIRE_FALSE(response->HasTransportError());
+	REQUIRE(response->GetRequestError().type == HTTPRequestErrorType::PROCESSING);
+	REQUIRE(response->GetError() == (message.empty() ? "Unknown error" : message));
+}
+
+TEST_CASE("Returned request errors remain failures despite a successful HTTP status", "[http]") {
+	HTTPUtil http_util;
+	HTTPParams params(http_util);
+	params.retries = 1;
+	params.retry_wait_ms = 0;
+	HeadRequestInfo request("http://example.com/file", HTTPHeaders(), params);
+	request.try_request = true;
+	auto quota = http_util.GetRetryQuota(request.proto_host_port);
+	REQUIRE(quota->TryAcquire(HTTPRetryQuota::RETRY_COST));
+	HTTPRequestErrorType type = HTTPRequestErrorType::PROCESSING;
+	SECTION("Processing") {
+	}
+	SECTION("Unclassified request failure") {
+		type = HTTPRequestErrorType::UNKNOWN;
+	}
+	SECTION("Transport failure") {
+		type = HTTPRequestErrorType::TRANSPORT;
+	}
+	SECTION("Timeout") {
+		type = HTTPRequestErrorType::TIMEOUT;
+	}
+	SECTION("Connection") {
+		type = HTTPRequestErrorType::CONNECT;
+	}
+	SECTION("TLS") {
+		type = HTTPRequestErrorType::TLS;
+	}
+	idx_t sends = 0;
+	auto response = HTTPUtil::RunRequestWithRetry(
+	    [&]() {
+		    sends++;
+		    auto failed = make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+		    failed->reason = "OK";
+		    failed->SetRequestError({type, "Request failed after receiving headers"});
+		    return failed;
+	    },
+	    request, {});
+	const bool transport_error = type != HTTPRequestErrorType::PROCESSING && type != HTTPRequestErrorType::UNKNOWN;
+	REQUIRE(sends == (transport_error ? 2 : 1));
+	REQUIRE_FALSE(response->Success());
+	REQUIRE(response->status == HTTPStatusCode::OK_200);
+	REQUIRE(response->HasRequestError());
+	REQUIRE(response->HasTransportError() == transport_error);
+	REQUIRE(response->GetRequestError().type == type);
+	REQUIRE(response->GetError() == "Request failed after receiving headers");
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST -
+	                                  (transport_error ? HTTPRetryQuota::TRANSIENT_RETRY_COST : 0));
+}
+
 TEST_CASE("The coordinator's explicit outcome settles the host quota", "[http]") {
 	ErrorDocumentHTTPUtil http_util;
 	HTTPParams params(http_util);
@@ -815,7 +946,7 @@ TEST_CASE("A returned transport error carries the quota exhaustion note where Ge
 	    [&]() {
 		    sends++;
 		    auto failed = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-		    failed->SetTransportError({HTTPTransportErrorType::UNKNOWN, "Connection reset by peer"});
+		    failed->SetRequestError({HTTPRequestErrorType::TRANSPORT, "Connection reset by peer"});
 		    return failed;
 	    },
 	    request, {});
@@ -840,6 +971,7 @@ TEST_CASE("A returned HTTP error with the quota exhaustion note still parses as 
 	throttled.reason = "Too Many Requests";
 	throttled.headers.InsertIfAbsent("ETag", "W/\"bf-0ojpck62M0d8\"");
 	HTTPException error_sent(throttled, "HTTP HEAD error on '%s' (HTTP 429 Too Many Requests)", request.url);
+	HTTPRequestErrorType type = HTTPRequestErrorType::PROCESSING;
 
 	unique_ptr<HTTPResponse> response;
 	SECTION("The request throws the error") {
@@ -847,19 +979,22 @@ TEST_CASE("A returned HTTP error with the quota exhaustion note still parses as 
 		REQUIRE(quota->TryAcquire(HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST));
 		response = HTTPUtil::RunRequestWithRetry([&]() -> unique_ptr<HTTPResponse> { throw error_sent; }, request, {});
 	}
-	SECTION("The request returns the error") {
+	SECTION("The transport reports a serialized exception as its diagnostic") {
+		type = HTTPRequestErrorType::TRANSPORT;
 		// Room for exactly one transport-failure retry
 		REQUIRE(quota->TryAcquire(HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::TRANSIENT_RETRY_COST));
 		response = HTTPUtil::RunRequestWithRetry(
 		    [&]() {
 			    auto failed = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			    failed->SetTransportError({HTTPTransportErrorType::UNKNOWN, error_sent.what()});
+			    failed->SetRequestError({type, error_sent.what()});
 			    return failed;
 		    },
 		    request, {});
 	}
-	REQUIRE(response->HasTransportError());
-	ErrorData error(response->GetTransportError().message);
+	REQUIRE(response->HasRequestError());
+	REQUIRE(response->GetRequestError().type == type);
+	REQUIRE(response->HasTransportError() == (type == HTTPRequestErrorType::TRANSPORT));
+	ErrorData error(response->GetRequestError().message);
 	REQUIRE(error.Type() == ExceptionType::HTTP);
 	REQUIRE(error.ExtraInfo().at("status_code") == "429");
 	REQUIRE(error.ExtraInfo().at("header_ETag") == "W/\"bf-0ojpck62M0d8\"");

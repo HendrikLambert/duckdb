@@ -1,17 +1,14 @@
 diff --git a/src/catalog/rest/api/catalog_api.cpp b/src/catalog/rest/api/catalog_api.cpp
-index 72e9628c3..bcfdda7c2 100644
+index 72e9628c3..aee289ef2 100644
 --- a/src/catalog/rest/api/catalog_api.cpp
 +++ b/src/catalog/rest/api/catalog_api.cpp
-@@ -58,9 +58,10 @@ vector<string> IRCAPI::ParseSchemaName(const string &namespace_name) {
- [[noreturn]] static void ThrowException(const string &url, const HTTPResponse &response, const string &method) {
- 	D_ASSERT(!response.Success());
+@@ -60,7 +60,8 @@ vector<string> IRCAPI::ParseSchemaName(const string &namespace_name) {
  
--	if (response.HasRequestError()) {
-+	if (response.HasTransportError()) {
+ 	if (response.HasRequestError()) {
  		//! Request error - this means something went wrong performing the request
 -		throw IOException("%s request to endpoint '%s' failed: (ERROR %s)", method, url, response.GetRequestError());
 +		throw IOException("%s request to endpoint '%s' failed: (ERROR %s)", method, url,
-+		                  response.GetTransportError().message);
++		                  response.GetRequestError().message);
  	}
  	unique_ptr<JSONDocument> error_doc;
  	auto error_obj = ICUtils::GetErrorMessage(response.body, error_doc);

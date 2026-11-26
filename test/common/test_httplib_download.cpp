@@ -5,6 +5,7 @@
 #include "duckdb/main/http/http_util.hpp"
 #include "httplib.hpp"
 
+#include <atomic>
 #include <thread>
 
 namespace duckdb {
@@ -83,13 +84,65 @@ TEST_CASE("Built-in HTTP client downloads responses larger than 100 MiB", "[http
 	REQUIRE(response);
 	if (truncated) {
 		REQUIRE(response->HasTransportError());
-		CHECK(response->GetTransportError().message == "Failed to read connection");
+		CHECK(response->GetRequestError().type == HTTPRequestErrorType::TRANSPORT);
+		CHECK(response->ShouldRetry());
+		CHECK(response->GetRequestError().message == "Failed to read connection");
 	} else {
 		REQUIRE(!response->HasTransportError());
 		CHECK(response->status == HTTPStatusCode::OK_200);
 		CHECK(response->body.size() == response_length);
 		CHECK(response->body.find_first_not_of('x') == string::npos);
 	}
+}
+
+TEST_CASE("Built-in HTTP client does not retry handler cancellation", "[httplib]") {
+	DBConfig config;
+	config.options.load_extensions = false;
+	DuckDB db(nullptr, &config);
+	auto &http_util = HTTPUtil::Get(*db.instance);
+	if (http_util.GetName() == "none") {
+		return;
+	}
+	REQUIRE(http_util.GetName() == "Built-In");
+
+	bool cancel_response = false;
+	SECTION("Content handler") {
+	}
+	SECTION("Response handler") {
+		cancel_response = true;
+	}
+	std::atomic<idx_t> requests {0};
+	duckdb_httplib::Server server;
+	server.Get("/", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &response) {
+		requests++;
+		response.set_content("response body", "text/plain");
+	});
+	auto port = server.bind_to_any_port("127.0.0.1");
+	REQUIRE(port > 0);
+	std::thread listener([&]() { server.listen_after_bind(); });
+	duckdb_httplib::detail::scope_exit cleanup([&]() {
+		server.stop();
+		listener.join();
+	});
+	server.wait_until_ready();
+
+	HTTPParams params(http_util);
+	params.retries = 2;
+	params.retry_wait_ms = 0;
+	params.keep_alive = false;
+	const auto url = StringUtil::Format("http://127.0.0.1:%d/", port);
+	GetRequestInfo request(
+	    url, HTTPHeaders(), params, [&](const HTTPResponse &) { return !cancel_response; },
+	    [](const_data_ptr_t, idx_t) { return false; });
+	request.try_request = true;
+	auto response = http_util.Request(request);
+	REQUIRE(response);
+	CHECK_FALSE(response->Success());
+	CHECK(response->HasRequestError());
+	CHECK_FALSE(response->HasTransportError());
+	CHECK(response->GetRequestError().type == HTTPRequestErrorType::PROCESSING);
+	CHECK(response->GetError() == "Connection handling canceled");
+	CHECK(requests.load() == 1);
 }
 
 } // namespace duckdb

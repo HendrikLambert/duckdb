@@ -20,21 +20,33 @@
 
 namespace duckdb {
 
-static HTTPTransportErrorType GetTransportErrorType(duckdb_httplib::Error error) {
+static HTTPRequestErrorType GetRequestErrorType(duckdb_httplib::Error error) {
 	switch (error) {
 	case duckdb_httplib::Error::ConnectionTimeout:
 	case duckdb_httplib::Error::Timeout:
-		return HTTPTransportErrorType::TIMEOUT;
+		return HTTPRequestErrorType::TIMEOUT;
 	case duckdb_httplib::Error::Connection:
 	case duckdb_httplib::Error::ProxyConnection:
-		return HTTPTransportErrorType::CONNECT;
+	case duckdb_httplib::Error::BindIPAddress:
+		return HTTPRequestErrorType::CONNECT;
 	case duckdb_httplib::Error::SSLConnection:
 	case duckdb_httplib::Error::SSLLoadingCerts:
 	case duckdb_httplib::Error::SSLServerVerification:
 	case duckdb_httplib::Error::SSLServerHostnameVerification:
-		return HTTPTransportErrorType::TLS;
+		return HTTPRequestErrorType::TLS;
+	case duckdb_httplib::Error::Read:
+	case duckdb_httplib::Error::Write:
+	case duckdb_httplib::Error::ConnectionClosed:
+		return HTTPRequestErrorType::TRANSPORT;
+	case duckdb_httplib::Error::Canceled:
+	case duckdb_httplib::Error::ExceedRedirectCount:
+	case duckdb_httplib::Error::InvalidHeaders:
+	case duckdb_httplib::Error::UnsupportedMultipartBoundaryChars:
+	case duckdb_httplib::Error::Compression:
+	case duckdb_httplib::Error::UnsupportedContentEncoding:
+		return HTTPRequestErrorType::PROCESSING;
 	default:
-		return HTTPTransportErrorType::UNKNOWN;
+		return HTTPRequestErrorType::UNKNOWN;
 	}
 }
 
@@ -119,7 +131,7 @@ private:
 			return TransformResponse(response);
 		} else {
 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->SetTransportError({GetTransportErrorType(res.error()), to_string(res.error())});
+			result->SetRequestError({GetRequestErrorType(res.error()), to_string(res.error())});
 			return result;
 		}
 	}

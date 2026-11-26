@@ -482,7 +482,7 @@ unique_ptr<HTTPResponse> HTTPTransportManager::PerformRequest(Session &session, 
 		lease.InvalidateClient();
 		throw;
 	}
-	if (response->HasTransportError()) {
+	if (response->HasRequestError()) {
 		lease.InvalidateClient();
 	}
 	return response;

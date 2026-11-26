@@ -181,22 +181,26 @@ private:
 	header_map_t headers;
 };
 
-//! The kind of transport failure of a request, if any
-enum class HTTPTransportErrorType : uint8_t {
-	//! No transport failure
+//! The kind of request failure, if any
+enum class HTTPRequestErrorType : uint8_t {
+	//! No request failure
 	NONE,
-	//! Failed for a reason the transport did not classify
+	//! Unclassified request failure, not necessarily a transport failure
 	UNKNOWN,
 	//! Connecting or transferring took too long
 	TIMEOUT,
 	//! The host could not be resolved or connected to
 	CONNECT,
 	//! The TLS handshake or the certificate verification failed
-	TLS
+	TLS,
+	//! The request or its response could not be processed
+	PROCESSING,
+	//! Known transport failure not classified as TIMEOUT, CONNECT or TLS
+	TRANSPORT
 };
 
-struct HTTPTransportError {
-	HTTPTransportErrorType type = HTTPTransportErrorType::NONE;
+struct HTTPRequestError {
+	HTTPRequestErrorType type = HTTPRequestErrorType::NONE;
 	string message;
 };
 
@@ -210,7 +214,6 @@ struct HTTPResponse {
 	string body;
 	string reason;
 	HTTPHeaders headers;
-	// FIXME: remove, derive Success() from the transport error and the status
 	bool success = true;
 
 public:
@@ -219,19 +222,17 @@ public:
 
 	bool Success() const;
 
-	//! Marks the request as failed without a complete response
-	void SetTransportError(HTTPTransportError error);
+	//! Records a request failure and its diagnostic
+	void SetRequestError(HTTPRequestError error);
+	bool HasRequestError() const;
 	bool HasTransportError() const;
-	const HTTPTransportError &GetTransportError() const;
+	const HTTPRequestError &GetRequestError() const;
 	const string &GetError() const;
-
-	[[deprecated("Use HasTransportError instead")]] bool HasRequestError() const;
-	[[deprecated("Use GetTransportError().message instead")]] const string &GetRequestError() const;
 
 	bool ShouldRetry() const;
 
 private:
-	HTTPTransportError transport_error;
+	HTTPRequestError request_error;
 };
 
 struct BaseRequest {

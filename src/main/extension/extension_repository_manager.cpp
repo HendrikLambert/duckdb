@@ -518,8 +518,8 @@ static string ReadAuthenticatedHTTPS(DatabaseInstance &db, optional_ptr<ClientCo
 		                  "take",
 		                  what, url, MAX_METADATA_FILE_SIZE);
 	}
-	if (response->HasTransportError()) {
-		throw IOException("Failed to read the %s '%s': %s", what, url, response->GetTransportError().message);
+	if (response->HasRequestError()) {
+		throw IOException("Failed to read the %s '%s': %s", what, url, response->GetRequestError().message);
 	}
 	if (!response->Success()) {
 		throw IOException("Failed to read the %s '%s': HTTP %d %s", what, url, static_cast<int32_t>(response->status),

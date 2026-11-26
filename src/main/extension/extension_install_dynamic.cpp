@@ -297,10 +297,10 @@ InstallFromHttpUrl(DatabaseInstance &db, const string &url, const string &extens
 		if (!documentation_link.empty()) {
 			message += "\nFor more info, visit " + documentation_link;
 		}
-		if (response->HasTransportError()) {
+		if (response->HasRequestError()) {
 			// request error - this means something went wrong performing the request
 			throw IOException("Failed to download extension \"%s\" at URL \"%s\"\n%s (ERROR %s)", extension_name, url,
-			                  message, response->GetTransportError().message);
+			                  message, response->GetRequestError().message);
 		}
 		// if this was not a request error this means the server responded - report the response status and response
 		throw HTTPException(*response, "Failed to download extension \"%s\" at URL \"%s\" (HTTP %n)\n%s",
